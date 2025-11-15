@@ -1,0 +1,20 @@
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start>
+    <ref name="div"/>
+  </start>
+
+  <define name="div">
+    <element name="div">
+      <zeroOrMore>
+        <choice>
+          <anyName>
+            <except>
+              <name>class</name>
+              <name>id</name>
+            </except>
+          </anyName>
+        </choice>
+      </zeroOrMore>
+    </element>
+  </define>
+</grammar>

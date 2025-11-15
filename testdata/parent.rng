@@ -1,0 +1,13 @@
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start>
+    <ref name="root"/>
+  </start>
+
+  <include href="child.rng"/>
+
+  <define name="root">
+    <element name="root">
+      <ref name="child"/>
+    </element>
+  </define>
+</grammar>

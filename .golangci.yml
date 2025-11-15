@@ -1,0 +1,150 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+  modules-download-mode: readonly
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+
+  govet:
+    enable-all: true
+    disable:
+      - shadow
+
+  # gocyclo:
+  #   min-complexity: 15
+
+  dupl:
+    threshold: 100
+
+  goconst:
+    min-len: 3
+    min-occurrences: 3
+
+  misspell:
+    locale: US
+
+  # lll:
+  #   line-length: 120
+  #   tab-width: 4
+
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - style
+      - performance
+      - experimental
+      - opinionated
+    disabled-checks:
+      - whyNoLint
+      - hugeParam
+
+  funlen:
+    lines: 100
+    statements: 50
+
+  nestif:
+    min-complexity: 5
+
+  # cyclop:
+  #   max-complexity: 15
+  #   skip-tests: true
+
+  revive:
+    rules:
+      - name: blank-imports
+      - name: context-as-argument
+      - name: dot-imports
+      - name: error-return
+      - name: error-strings
+      - name: error-naming
+      - name: exported
+      - name: if-return
+      - name: increment-decrement
+      - name: var-naming
+      - name: var-declaration
+      - name: package-comments
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      - name: indent-error-flow
+      - name: errorf
+      - name: empty-block
+      - name: superfluous-else
+      - name: unused-parameter
+      - name: unreachable-code
+      - name: redefines-builtin-id
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    # - gocyclo  # Commented out - parser has complex functions
+    - misspell
+    - goconst
+    - dupl
+    # - lll  # Commented out - many long lines in parser
+    - gocritic
+    - funlen
+    - nestif
+    # - cyclop  # Commented out - parser has complex functions, focus on lower hanging fruit first
+    - revive
+    - unconvert
+    - unparam
+    - nakedret
+    - prealloc
+    - gosec
+    - bodyclose
+    - nilerr
+    - nolintlint
+    - makezero
+    - copyloopvar
+
+  disable:
+    - gochecknoglobals
+    - gochecknoinits
+    - exhaustive
+    - exhaustruct
+    - wrapcheck
+    - paralleltest
+    - forcetypeassert
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+  exclude-rules:
+    # Exclude some linters from running on tests files
+    - path: _test\.go
+      linters:
+        - funlen
+        - dupl
+        - nestif
+
+    # Exclude some staticcheck messages
+    - linters:
+         - staticcheck
+      text: "SA1019:"
+
+    # # Exclude lll issues for long lines with go:generate
+    # - linters:
+    #     - lll
+    #   source: "^//go:generate "
+
+    # Allow unused parameters in interfaces
+    - linters:
+         - revive
+      text: "unused-parameter"
+      source: "type.*interface"
+
+output:
+  sort-results: true

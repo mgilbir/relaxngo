@@ -1,0 +1,15 @@
+<grammar xmlns="http://relaxng.org/ns/structure/1.0" datatypeLibrary="http://www.w3.org/2001/XMLSchema-datatypes">
+  <start>
+    <ref name="numbers"/>
+  </start>
+
+  <define name="numbers">
+    <element name="numbers">
+      <attribute name="values">
+        <list>
+          <data type="integer"/>
+        </list>
+      </attribute>
+    </element>
+  </define>
+</grammar>

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<account id="999">
+  <username>ab</username>
+  <email>notanemail</email>
+  <age>200</age>
+  <balance>1500.999</balance>
+</account>

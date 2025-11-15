@@ -1,0 +1,22 @@
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start>
+    <ref name="paragraph"/>
+  </start>
+
+  <define name="paragraph">
+    <element name="p">
+      <mixed>
+        <zeroOrMore>
+          <choice>
+            <element name="em">
+              <text/>
+            </element>
+            <element name="strong">
+              <text/>
+            </element>
+          </choice>
+        </zeroOrMore>
+      </mixed>
+    </element>
+  </define>
+</grammar>

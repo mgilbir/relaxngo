@@ -1,0 +1,17 @@
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start>
+    <ref name="root"/>
+  </start>
+
+  <define name="root">
+    <element name="root">
+      <zeroOrMore>
+        <anyName>
+          <except>
+            <name>forbidden</name>
+          </except>
+        </anyName>
+      </zeroOrMore>
+    </element>
+  </define>
+</grammar>

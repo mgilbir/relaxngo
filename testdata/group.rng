@@ -1,0 +1,21 @@
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start>
+    <ref name="article"/>
+  </start>
+
+  <define name="article">
+    <element name="article">
+      <group>
+        <element name="title">
+          <text/>
+        </element>
+        <element name="author">
+          <text/>
+        </element>
+        <element name="content">
+          <text/>
+        </element>
+      </group>
+    </element>
+  </define>
+</grammar>

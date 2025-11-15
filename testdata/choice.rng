@@ -1,0 +1,16 @@
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start>
+    <ref name="item"/>
+  </start>
+
+  <define name="item">
+    <element name="item">
+      <attribute name="status">
+        <choice>
+          <value>active</value>
+          <value>inactive</value>
+        </choice>
+      </attribute>
+    </element>
+  </define>
+</grammar>

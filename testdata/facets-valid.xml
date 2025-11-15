@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<account id="1234">
+  <username>john_doe</username>
+  <email>john@example.com</email>
+  <age>35</age>
+  <balance>1500.50</balance>
+</account>

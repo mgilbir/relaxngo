@@ -1,0 +1,66 @@
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start>
+    <ref name="html"/>
+  </start>
+
+  <define name="html">
+    <element name="html">
+      <ref name="head"/>
+      <ref name="body"/>
+    </element>
+  </define>
+
+  <define name="head">
+    <element name="head">
+      <element name="title">
+        <text/>
+      </element>
+    </element>
+  </define>
+
+  <define name="body">
+    <element name="body">
+      <zeroOrMore>
+        <ref name="block"/>
+      </zeroOrMore>
+    </element>
+  </define>
+
+  <define name="block">
+    <choice>
+      <ref name="paragraph"/>
+      <ref name="heading"/>
+    </choice>
+  </define>
+
+  <define name="paragraph">
+    <element name="p">
+      <mixed>
+        <zeroOrMore>
+          <choice>
+            <ref name="em"/>
+            <ref name="strong"/>
+          </choice>
+        </zeroOrMore>
+      </mixed>
+    </element>
+  </define>
+
+  <define name="heading">
+    <element name="h1">
+      <text/>
+    </element>
+  </define>
+
+  <define name="em">
+    <element name="em">
+      <text/>
+    </element>
+  </define>
+
+  <define name="strong">
+    <element name="strong">
+      <text/>
+    </element>
+  </define>
+</grammar>

@@ -1,0 +1,10 @@
+<html>
+  <head>
+    <title>Test Document</title>
+  </head>
+  <body>
+    <h1>Welcome</h1>
+    <p>This is a paragraph with <em>emphasis</em> and <strong>strong text</strong>.</p>
+    <p>Another paragraph here.</p>
+  </body>
+</html>

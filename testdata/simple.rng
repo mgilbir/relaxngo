@@ -1,0 +1,17 @@
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start>
+    <ref name="person"/>
+  </start>
+
+  <define name="person">
+    <element name="person">
+      <attribute name="id"/>
+      <element name="name">
+        <text/>
+      </element>
+      <optional>
+        <attribute name="age"/>
+      </optional>
+    </element>
+  </define>
+</grammar>

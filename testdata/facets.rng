@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start>
+    <ref name="account"/>
+  </start>
+
+  <define name="account">
+    <element name="account">
+      <attribute name="id">
+        <data type="integer">
+          <param name="minInclusive">1000</param>
+          <param name="maxInclusive">9999</param>
+        </data>
+      </attribute>
+      <element name="username">
+        <data type="string">
+          <param name="minLength">3</param>
+          <param name="maxLength">20</param>
+          <param name="pattern">[a-zA-Z0-9_]+</param>
+        </data>
+      </element>
+      <element name="email">
+        <data type="string">
+          <param name="pattern">.+@.+\..+</param>
+        </data>
+      </element>
+      <element name="age">
+        <data type="integer">
+          <param name="minInclusive">0</param>
+          <param name="maxInclusive">150</param>
+        </data>
+      </element>
+      <optional>
+        <element name="balance">
+          <data type="decimal">
+            <param name="fractionDigits">2</param>
+            <param name="minInclusive">0</param>
+          </data>
+        </element>
+      </optional>
+    </element>
+  </define>
+</grammar>
