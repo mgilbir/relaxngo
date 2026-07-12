@@ -12,6 +12,7 @@ import (
 	"text/template"
 
 	"github.com/mgilbir/relaxngo/generator"
+	"github.com/mgilbir/relaxngo/internal/conformance"
 	"github.com/mgilbir/relaxngo/rng"
 	"github.com/mgilbir/relaxngo/validator"
 )
@@ -34,7 +35,7 @@ func TestGeneratorOfficialSuite(t *testing.T) {
 		testDataPath = filepath.Join(cwd, "..", "testdata", "official-tests")
 	}
 
-	tests, err := validator.LoadTestsFromFolder(testDataPath)
+	tests, err := conformance.LoadTestsFromFolder(testDataPath)
 	if err != nil {
 		t.Fatalf("Failed to load official tests: %v", err)
 	}

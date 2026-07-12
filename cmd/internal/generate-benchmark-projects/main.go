@@ -10,8 +10,8 @@ import (
 	"strings"
 
 	"github.com/mgilbir/relaxngo/generator"
+	"github.com/mgilbir/relaxngo/internal/conformance"
 	"github.com/mgilbir/relaxngo/rng"
-	"github.com/mgilbir/relaxngo/validator"
 )
 
 // Generate benchmark projects from the official RELAX NG test suite.
@@ -54,7 +54,7 @@ func main() {
 
 	// Load all official tests
 	testDataPath := "testdata/official-tests"
-	tests, err := validator.LoadTestsFromFolder(testDataPath)
+	tests, err := conformance.LoadTestsFromFolder(testDataPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load official tests: %v\n", err)
 		os.Exit(1)
@@ -72,7 +72,7 @@ func main() {
 	printSummary(stats)
 }
 
-func generateProjects(tests []validator.FolderTestCase, outputDir string) struct {
+func generateProjects(tests []conformance.FolderTestCase, outputDir string) struct {
 	Total            int
 	Generated        int
 	Skipped          int

@@ -1,4 +1,8 @@
-package validator
+// Package conformance runs the RELAX NG official test suite and folder-based
+// test cases against the validator. It lives under internal/ so the harness
+// (which pulls in os, html, and 1200 lines of test plumbing) is never compiled
+// into external importers of the validator package.
+package conformance
 
 import (
 	"bytes"
@@ -10,6 +14,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/mgilbir/relaxngo/validator"
 
 	"github.com/mgilbir/relaxngo/rng"
 )
@@ -415,21 +421,21 @@ func processOfficialCorrectSchema(tc *OfficialTestCase, testID, section string, 
 		return []TestResult{result}
 	}
 
-	validator := NewValidator(grammar, DefaultOptions())
+	val := validator.NewValidator(grammar, validator.DefaultOptions())
 
 	// Validate valid documents
-	validResults := validateOfficialValidDocuments(tc, testID, section, index, validator)
+	validResults := validateOfficialValidDocuments(tc, testID, section, index, val)
 	results = append(results, validResults...)
 
 	// Validate invalid documents
-	invalidResults := validateOfficialInvalidDocuments(tc, testID, section, index, validator)
+	invalidResults := validateOfficialInvalidDocuments(tc, testID, section, index, val)
 	results = append(results, invalidResults...)
 
 	return results
 }
 
 // validateOfficialValidDocuments validates documents that should pass from the official suite
-func validateOfficialValidDocuments(tc *OfficialTestCase, testID, section string, index int, validator *Validator) []TestResult {
+func validateOfficialValidDocuments(tc *OfficialTestCase, testID, section string, index int, val *validator.Validator) []TestResult {
 	results := make([]TestResult, 0, len(tc.Valid))
 
 	for i, validDoc := range tc.Valid {
@@ -441,7 +447,7 @@ func validateOfficialValidDocuments(tc *OfficialTestCase, testID, section string
 			Documentation: tc.Docs,
 		}
 
-		errs, err := validator.Validate(strings.NewReader(validDoc))
+		errs, err := val.Validate(strings.NewReader(validDoc))
 		if err == nil && len(errs) == 0 {
 			result.Passed = true
 		} else {
@@ -460,7 +466,7 @@ func validateOfficialValidDocuments(tc *OfficialTestCase, testID, section string
 }
 
 // validateOfficialInvalidDocuments validates documents that should fail from the official suite
-func validateOfficialInvalidDocuments(tc *OfficialTestCase, testID, section string, index int, validator *Validator) []TestResult {
+func validateOfficialInvalidDocuments(tc *OfficialTestCase, testID, section string, index int, val *validator.Validator) []TestResult {
 	results := make([]TestResult, 0, len(tc.Invalid))
 
 	for i, invalidDoc := range tc.Invalid {
@@ -472,7 +478,7 @@ func validateOfficialInvalidDocuments(tc *OfficialTestCase, testID, section stri
 			Documentation: tc.Docs,
 		}
 
-		errs, err := validator.Validate(strings.NewReader(invalidDoc))
+		errs, err := val.Validate(strings.NewReader(invalidDoc))
 		if err != nil || len(errs) > 0 {
 			result.Passed = true
 		} else {
@@ -925,17 +931,17 @@ func processCorrectSchemaTest(tc *FolderTestCase, testID, section string, result
 		return []TestResult{result}, nil
 	}
 
-	validator := NewValidator(grammar, DefaultOptions())
+	val := validator.NewValidator(grammar, validator.DefaultOptions())
 
 	// Validate valid documents
-	validResults, err := validateCorrectDocuments(tc, testID, section, validator, resultID)
+	validResults, err := validateCorrectDocuments(tc, testID, section, val, resultID)
 	if err != nil {
 		return nil, err
 	}
 	testResults = append(testResults, validResults...)
 
 	// Validate invalid documents
-	invalidResults, err := validateIncorrectDocuments(tc, testID, section, validator, resultID)
+	invalidResults, err := validateIncorrectDocuments(tc, testID, section, val, resultID)
 	if err != nil {
 		return nil, err
 	}
@@ -945,7 +951,7 @@ func processCorrectSchemaTest(tc *FolderTestCase, testID, section string, result
 }
 
 // validateCorrectDocuments validates documents that should pass validation
-func validateCorrectDocuments(tc *FolderTestCase, testID, section string, validator *Validator, resultID *int) ([]TestResult, error) {
+func validateCorrectDocuments(tc *FolderTestCase, testID, section string, val *validator.Validator, resultID *int) ([]TestResult, error) {
 	results := make([]TestResult, 0, len(tc.Valid))
 
 	if len(tc.Valid) == 0 {
@@ -979,7 +985,7 @@ func validateCorrectDocuments(tc *FolderTestCase, testID, section string, valida
 			Documentation: fmt.Sprintf("Test case %d - Valid document %d", tc.Number, i+1),
 		}
 
-		errs, err := validator.Validate(strings.NewReader(string(validData)))
+		errs, err := val.Validate(strings.NewReader(string(validData)))
 		if err == nil && len(errs) == 0 {
 			result.Passed = true
 		} else {
@@ -999,7 +1005,7 @@ func validateCorrectDocuments(tc *FolderTestCase, testID, section string, valida
 }
 
 // validateIncorrectDocuments validates documents that should fail validation
-func validateIncorrectDocuments(tc *FolderTestCase, testID, section string, validator *Validator, resultID *int) ([]TestResult, error) {
+func validateIncorrectDocuments(tc *FolderTestCase, testID, section string, val *validator.Validator, resultID *int) ([]TestResult, error) {
 	results := make([]TestResult, 0, len(tc.Invalid))
 
 	if len(tc.Invalid) == 0 {
@@ -1033,7 +1039,7 @@ func validateIncorrectDocuments(tc *FolderTestCase, testID, section string, vali
 			Documentation: fmt.Sprintf("Test case %d - Invalid document %d", tc.Number, i+1),
 		}
 
-		errs, err := validator.Validate(strings.NewReader(string(invalidData)))
+		errs, err := val.Validate(strings.NewReader(string(invalidData)))
 		if err != nil || len(errs) > 0 {
 			result.Passed = true
 		} else {

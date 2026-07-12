@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mgilbir/relaxngo/internal/conformance"
 	"github.com/mgilbir/relaxngo/rng"
 	"github.com/mgilbir/relaxngo/validator"
 )
@@ -67,7 +68,7 @@ func BenchmarkGeneratorClean(b *testing.B) {
 	if !fileExists(testDataPath) {
 		testDataPath = filepath.Join(cwd, "..", "testdata", "official-tests")
 	}
-	tests, err := validator.LoadTestsFromFolder(testDataPath)
+	tests, err := conformance.LoadTestsFromFolder(testDataPath)
 	if err != nil {
 		b.Fatalf("Failed to load official tests: %v", err)
 	}
