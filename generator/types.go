@@ -253,6 +253,18 @@ func GenerateTypes(grammar *rng.Grammar) ([]TypeInfo, error) {
 
 // collectNestedElements recursively collects all nested elements in the schema
 func collectNestedElements(elem *rng.Element, collected map[string]*rng.Element) {
+	// Collect from direct nested elements. addDirectElements emits a field
+	// typed after the child element when it has nested content, so that child
+	// type must be generated too — otherwise the output references an undefined
+	// type and does not compile.
+	for i := range elem.Elements {
+		subElem := &elem.Elements[i]
+		if subElem.Name != "" && collected[subElem.Name] == nil {
+			collected[subElem.Name] = subElem
+			collectNestedElements(subElem, collected)
+		}
+	}
+
 	// Collect from groups
 	for _, group := range elem.Group {
 		for _, subElem := range group.Elements {
