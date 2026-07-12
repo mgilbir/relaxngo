@@ -107,6 +107,7 @@ type Grammar struct {
 	Groups          []Group       `xml:"group"`     // Captures invalid group
 	Refs            []Ref         `xml:"ref"`       // Captures invalid ref
 	Attrs           []Attribute   `xml:"attribute"` // Captures invalid attribute
+	RawAttrs        []xml.Attr    `xml:",any,attr"` // Root attributes incl. xmlns declarations (prefix bindings)
 	RawContent      []byte        `xml:",innerxml"`
 }
 
