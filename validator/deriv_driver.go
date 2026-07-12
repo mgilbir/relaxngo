@@ -180,7 +180,40 @@ func buildDocTree(data []byte) (*elemNode, error) {
 			return nil, err
 		}
 		if se, ok := tok.(xml.StartElement); ok {
-			return readElement(dec, data, se, off)
+			root, err := readElement(dec, data, se, off)
+			if err != nil {
+				return nil, err
+			}
+			// A well-formed document has exactly one root element. Reject any
+			// further element (a second root) or non-whitespace text after it;
+			// otherwise trailing junk like <foo/><bar/> would validate clean.
+			if err := expectNoTrailingContent(dec); err != nil {
+				return nil, err
+			}
+			return root, nil
+		}
+	}
+}
+
+// expectNoTrailingContent scans the tokens following the root element and
+// returns an error if anything other than whitespace, comments, or processing
+// instructions appears before EOF.
+func expectNoTrailingContent(dec *xml.Decoder) error {
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			return fmt.Errorf("unexpected element <%s> after root element", t.Name.Local)
+		case xml.CharData:
+			if !isWhitespace(string(t)) {
+				return fmt.Errorf("unexpected text content after root element")
+			}
 		}
 	}
 }
