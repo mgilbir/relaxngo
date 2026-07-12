@@ -44,8 +44,51 @@ func includeUsesNs(raw string) bool {
 
 // bctx is the inherited context while walking a pattern's raw XML.
 type bctx struct {
-	ns  string // inherited target namespace for element/attribute names
-	dtl string // inherited datatypeLibrary
+	ns    string            // inherited target namespace for element/attribute names
+	dtl   string            // inherited datatypeLibrary
+	nsMap map[string]string // in-scope prefix -> namespace URI (for QNames in name attributes)
+}
+
+const xmlNamespace = "http://www.w3.org/XML/1998/namespace"
+
+// resolveQName resolves a name attribute value (which may be prefixed) to a
+// namespace and local part. Unprefixed names take defaultNs. The xml prefix is
+// always bound. An unknown prefix returns ok=false so the caller can defer.
+func resolveQName(name string, nsMap map[string]string, defaultNs string) (ns, local string, ok bool) {
+	name = strings.TrimSpace(name)
+	i := strings.IndexByte(name, ':')
+	if i < 0 {
+		return defaultNs, name, true
+	}
+	prefix, local := name[:i], name[i+1:]
+	if prefix == "xml" {
+		return xmlNamespace, local, true
+	}
+	if uri, found := nsMap[prefix]; found {
+		return uri, local, true
+	}
+	return "", "", false
+}
+
+// withNsDecls returns ctx with any xmlns:prefix declarations in attrs merged
+// into a fresh nsMap (so children don't mutate the parent's map).
+func withNsDecls(ctx bctx, attrs []xml.Attr) bctx {
+	var merged map[string]string
+	for _, a := range attrs {
+		if a.Name.Space == "xmlns" && a.Name.Local != "" {
+			if merged == nil {
+				merged = make(map[string]string, len(ctx.nsMap)+len(attrs))
+				for k, v := range ctx.nsMap {
+					merged[k] = v
+				}
+			}
+			merged[a.Name.Local] = a.Value
+		}
+	}
+	if merged != nil {
+		ctx.nsMap = merged
+	}
+	return ctx
 }
 
 type builder struct {
@@ -358,17 +401,26 @@ func (b *builder) groupStruct(g *rng.Group, ctx bctx) (pat, error) {
 // class comes from the (normalized) structured fields, its content from the
 // element's own RawContent.
 func (b *builder) elementFromStruct(el *rng.Element, ctx bctx) (pat, error) {
-	nc, err := ncFromElementStruct(el, ctx)
-	if err != nil {
-		return nil, err
-	}
-	childCtx := ctx
+	// Namespace prefixes declared on this element (its RawAttrs) are in scope
+	// for QNames appearing in its content's name attributes.
+	childCtx := withNsDecls(ctx, el.RawAttrs)
 	if el.Ns != "" {
 		childCtx.ns = el.Ns
 	}
 	if el.DatatypeLibrary != "" {
 		childCtx.dtl = el.DatatypeLibrary
 	}
+
+	nc, ncErr := ncFromElementStruct(el, ctx)
+	if ncErr != nil {
+		// No structured name class (e.g. a choice-of-names). Parse the name
+		// class and content directly from RawContent.
+		if len(bytes.TrimSpace(el.RawContent)) == 0 {
+			return nil, errUnsupported
+		}
+		return b.elementFromRawContent(el.RawContent, childCtx)
+	}
+
 	if len(bytes.TrimSpace(el.RawContent)) == 0 {
 		// Empty raw content is either a genuinely empty element or one whose
 		// content the parser moved into structured fields (nested-grammar
@@ -386,6 +438,52 @@ func (b *builder) elementFromStruct(el *rng.Element, ctx bctx) (pat, error) {
 		return nil, err
 	}
 	return pElem{nc: nc, p: content}, nil
+}
+
+// elementFromRawContent builds an element pattern from RawContent that begins
+// with a name-class child (the element used a name-class form the structured
+// fields did not capture, e.g. a choice of names) followed by content.
+func (b *builder) elementFromRawContent(raw []byte, ctx bctx) (pat, error) {
+	dec := xml.NewDecoder(bytes.NewReader(raw))
+	var nc nameClass
+	haveNC := false
+	var parts []pat
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		se, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		if foreignElem(se) {
+			if err := skipElement(dec, se); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if !haveNC {
+			if !isNameClassElem(se.Name.Local) {
+				return nil, errUnsupported
+			}
+			nc, err = b.parseNameClass(dec, se, ctx)
+			if err != nil {
+				return nil, err
+			}
+			haveNC = true
+			continue
+		}
+		p, err := b.parseElementToken(dec, se, ctx)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, p)
+	}
+	if !haveNC {
+		return nil, errUnsupported
+	}
+	return pElem{nc: nc, p: groupAll(parts)}, nil
 }
 
 // parseElementContent parses an element's content from RawContent, optionally
@@ -715,13 +813,13 @@ func (b *builder) parseAttribute(dec *xml.Decoder, se xml.StartElement, ctx bctx
 // follows the consumed name-class element(s).
 func (b *builder) elementNameClass(dec *xml.Decoder, se xml.StartElement, ctx bctx) (nameClass, *xml.StartElement, error) {
 	if name, ok := attr(se, "name"); ok {
-		name = strings.TrimSpace(name)
-		if strings.Contains(name, ":") {
-			return nil, nil, errUnsupported // unresolved QName prefix
+		ns, local, resolved := resolveQName(name, ctx.nsMap, ctx.ns)
+		if !resolved {
+			return nil, nil, errUnsupported // unknown QName prefix
 		}
-		return ncName{ns: ctx.ns, local: name}, nil, nil
+		return ncName{ns: ns, local: local}, nil, nil
 	}
-	// Name class is the first child element.
+	// Name class is the first (non-foreign) child element.
 	for {
 		tok, err := dec.Token()
 		if err != nil {
@@ -729,6 +827,12 @@ func (b *builder) elementNameClass(dec *xml.Decoder, se xml.StartElement, ctx bc
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
+			if foreignElem(t) {
+				if err := skipElement(dec, t); err != nil {
+					return nil, nil, err
+				}
+				continue
+			}
 			if isNameClassElem(t.Name.Local) {
 				nc, err := b.parseNameClass(dec, t, ctx)
 				if err != nil {
@@ -747,13 +851,13 @@ func (b *builder) elementNameClass(dec *xml.Decoder, se xml.StartElement, ctx bc
 
 func (b *builder) attrNameClass(dec *xml.Decoder, se xml.StartElement, actx, contentCtx bctx) (nameClass, *xml.StartElement, error) {
 	if name, ok := attr(se, "name"); ok {
-		name = strings.TrimSpace(name)
-		if strings.Contains(name, ":") {
+		// The shorthand name attribute of an attribute defaults to no namespace
+		// (it does not inherit the element namespace), but a prefix still binds.
+		ns, local, resolved := resolveQName(name, contentCtx.nsMap, actx.ns)
+		if !resolved {
 			return nil, nil, errUnsupported
 		}
-		// The shorthand name attribute of an attribute defaults to no
-		// namespace (it does not inherit the element namespace).
-		return ncName{ns: actx.ns, local: name}, nil, nil
+		return ncName{ns: ns, local: local}, nil, nil
 	}
 	for {
 		tok, err := dec.Token()
@@ -762,6 +866,12 @@ func (b *builder) attrNameClass(dec *xml.Decoder, se xml.StartElement, actx, con
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
+			if foreignElem(t) {
+				if err := skipElement(dec, t); err != nil {
+					return nil, nil, err
+				}
+				continue
+			}
 			if isNameClassElem(t.Name.Local) {
 				// A <name>/<nsName>/<anyName> child of an attribute inherits the
 				// namespace from its context, like an element's name class.
