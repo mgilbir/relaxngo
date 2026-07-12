@@ -26,7 +26,7 @@ type FieldInfo struct {
 }
 
 // buildTypeFromElement builds a TypeInfo from an element.
-func buildTypeFromElement(elem *rng.Element, typeName string, isRootType bool, nestedElements map[string]*rng.Element) TypeInfo {
+func buildTypeFromElement(elem *rng.Element, typeName string, isRootType bool, nestedElements map[string]*rng.Element, refElem map[string]string) TypeInfo {
 	typeInfo := TypeInfo{
 		Name:       typeName,
 		Fields:     make([]FieldInfo, 0),
@@ -39,10 +39,10 @@ func buildTypeFromElement(elem *rng.Element, typeName string, isRootType bool, n
 	addDirectAttributes(&typeInfo, elem, seenFields)
 	addDirectElements(&typeInfo, elem, seenFields)
 	addOptionalFields(&typeInfo, elem, seenFields)
-	addRefFields(&typeInfo, elem, seenFields)
-	addOneOrMoreFields(&typeInfo, elem, seenFields)
-	addGroupFields(&typeInfo, elem, seenFields)
-	addZeroOrMoreFields(&typeInfo, elem, seenFields)
+	addRefFields(&typeInfo, elem, seenFields, refElem)
+	addOneOrMoreFields(&typeInfo, elem, seenFields, refElem)
+	addGroupFields(&typeInfo, elem, seenFields, refElem)
+	addZeroOrMoreFields(&typeInfo, elem, seenFields, refElem)
 	addMixedField(&typeInfo, elem, seenFields)
 	addDataValueField(&typeInfo, elem, seenFields)
 	addListValueField(&typeInfo, elem, seenFields)
@@ -152,7 +152,7 @@ func buildMultiElementType(def *rng.Define, defineTypeName string, isRootType bo
 }
 
 // processDefines processes all defines from a grammar and builds types.
-func processDefines(grammar *rng.Grammar, rootDefineName string, types *[]TypeInfo, seenTypeNames map[string]bool, nestedElements map[string]*rng.Element) {
+func processDefines(grammar *rng.Grammar, rootDefineName string, types *[]TypeInfo, seenTypeNames map[string]bool, nestedElements map[string]*rng.Element, refElem map[string]string) {
 	for idx := range grammar.Defines {
 		def := &grammar.Defines[idx]
 		defineTypeName := toGoTypeName(def.Name)
@@ -184,7 +184,7 @@ func processDefines(grammar *rng.Grammar, rootDefineName string, types *[]TypeIn
 
 			// Still generate a type for the first element if it's not already there
 			if !seenTypeNames[elemTypeName] {
-				typeInfo := buildTypeFromElement(elem, elemTypeName, false, nestedElements)
+				typeInfo := buildTypeFromElement(elem, elemTypeName, false, nestedElements, refElem)
 				*types = append(*types, typeInfo)
 				seenTypeNames[elemTypeName] = true
 			}
@@ -194,7 +194,7 @@ func processDefines(grammar *rng.Grammar, rootDefineName string, types *[]TypeIn
 				continue
 			}
 
-			typeInfo := buildTypeFromElement(elem, elemTypeName, def.Name == rootDefineName, nestedElements)
+			typeInfo := buildTypeFromElement(elem, elemTypeName, def.Name == rootDefineName, nestedElements, refElem)
 			*types = append(*types, typeInfo)
 			seenTypeNames[elemTypeName] = true
 		}
@@ -202,7 +202,7 @@ func processDefines(grammar *rng.Grammar, rootDefineName string, types *[]TypeIn
 }
 
 // processNestedElements generates types for all collected nested elements.
-func processNestedElements(nestedElements map[string]*rng.Element, types *[]TypeInfo, seenTypeNames map[string]bool) {
+func processNestedElements(nestedElements map[string]*rng.Element, types *[]TypeInfo, seenTypeNames map[string]bool, refElem map[string]string) {
 	for elemName, elem := range nestedElements {
 		typeName := toGoTypeName(elemName)
 
@@ -211,7 +211,7 @@ func processNestedElements(nestedElements map[string]*rng.Element, types *[]Type
 			continue
 		}
 
-		typeInfo := buildTypeFromElement(elem, typeName, false, nestedElements)
+		typeInfo := buildTypeFromElement(elem, typeName, false, nestedElements, refElem)
 		*types = append(*types, typeInfo)
 		seenTypeNames[typeName] = true
 	}
@@ -223,6 +223,18 @@ func GenerateTypes(grammar *rng.Grammar) ([]TypeInfo, error) {
 	types := make([]TypeInfo, 0)
 	seenTypeNames := make(map[string]bool)
 	nestedElements := make(map[string]*rng.Element) // Collect nested elements
+
+	// A ref generates a field whose Go type and XML tag come from the element
+	// the referenced define wraps — not the define name, which may differ (e.g.
+	// after nested-grammar unpacking a define "foo_foo" can wrap <element
+	// name="innerFoo">). refElem maps define name -> that element's XML name.
+	refElem := make(map[string]string)
+	for i := range grammar.Defines {
+		d := &grammar.Defines[i]
+		if el := d.FirstElement(); el != nil && el.Name != "" {
+			refElem[d.Name] = el.Name
+		}
+	}
 
 	// Determine root define name from start element
 	var rootDefineName string
@@ -239,14 +251,14 @@ func GenerateTypes(grammar *rng.Grammar) ([]TypeInfo, error) {
 		typeName := toGoTypeName(elem.Name)
 
 		if !seenTypeNames[typeName] {
-			typeInfo := buildTypeFromElement(elem, typeName, true, nestedElements)
+			typeInfo := buildTypeFromElement(elem, typeName, true, nestedElements, refElem)
 			types = append(types, typeInfo)
 			seenTypeNames[typeName] = true
 		}
 	}
 
-	processDefines(grammar, rootDefineName, &types, seenTypeNames, nestedElements)
-	processNestedElements(nestedElements, &types, seenTypeNames)
+	processDefines(grammar, rootDefineName, &types, seenTypeNames, nestedElements, refElem)
+	processNestedElements(nestedElements, &types, seenTypeNames, refElem)
 
 	return types, nil
 }
@@ -480,35 +492,45 @@ func addOptionalElements(typeInfo *TypeInfo, opt *rng.Optional, seenFields map[s
 	}
 }
 
-func addRefFields(typeInfo *TypeInfo, elem *rng.Element, seenFields map[string]bool) {
+// refXMLName resolves a ref target to the XML name of the element the referenced
+// define wraps, so ref fields get the correct Go type and XML tag even when the
+// define name differs from the element name. Falls back to the ref name.
+func refXMLName(refElem map[string]string, name string) string {
+	if n, ok := refElem[name]; ok && n != "" {
+		return n
+	}
+	return name
+}
+
+func addRefFields(typeInfo *TypeInfo, elem *rng.Element, seenFields map[string]bool, refElem map[string]string) {
 	for _, ref := range elem.Ref {
 		fieldName := toGoFieldName(ref.Name)
 		if !seenFields[fieldName] {
 			typeInfo.Fields = append(typeInfo.Fields, FieldInfo{
 				Name:   fieldName,
-				Type:   toGoTypeName(ref.Name),
-				XMLTag: fmt.Sprintf("`xml:\"%s\"`", sanitizeRefName(ref.Name)),
+				Type:   toGoTypeName(refXMLName(refElem, ref.Name)),
+				XMLTag: fmt.Sprintf("`xml:\"%s\"`", sanitizeRefName(refXMLName(refElem, ref.Name))),
 			})
 			seenFields[fieldName] = true
 		}
 	}
 }
 
-func addOneOrMoreFields(typeInfo *TypeInfo, elem *rng.Element, seenFields map[string]bool) {
+func addOneOrMoreFields(typeInfo *TypeInfo, elem *rng.Element, seenFields map[string]bool, refElem map[string]string) {
 	for _, oneOrMore := range elem.OneOrMore {
-		addOneOrMoreRefs(typeInfo, &oneOrMore, seenFields)
+		addOneOrMoreRefs(typeInfo, &oneOrMore, seenFields, refElem)
 		addOneOrMoreElements(typeInfo, &oneOrMore, seenFields)
 	}
 }
 
-func addOneOrMoreRefs(typeInfo *TypeInfo, oneOrMore *rng.OneOrMore, seenFields map[string]bool) {
+func addOneOrMoreRefs(typeInfo *TypeInfo, oneOrMore *rng.OneOrMore, seenFields map[string]bool, refElem map[string]string) {
 	for _, ref := range oneOrMore.Ref {
 		fieldName := toGoFieldName(ref.Name)
 		if !seenFields[fieldName] {
 			typeInfo.Fields = append(typeInfo.Fields, FieldInfo{
 				Name:   fieldName,
-				Type:   "[]" + toGoTypeName(ref.Name),
-				XMLTag: fmt.Sprintf("`xml:\"%s\"`", sanitizeRefName(ref.Name)),
+				Type:   "[]" + toGoTypeName(refXMLName(refElem, ref.Name)),
+				XMLTag: fmt.Sprintf("`xml:\"%s\"`", sanitizeRefName(refXMLName(refElem, ref.Name))),
 			})
 			seenFields[fieldName] = true
 		}
@@ -529,10 +551,10 @@ func addOneOrMoreElements(typeInfo *TypeInfo, oneOrMore *rng.OneOrMore, seenFiel
 	}
 }
 
-func addGroupFields(typeInfo *TypeInfo, elem *rng.Element, seenFields map[string]bool) {
+func addGroupFields(typeInfo *TypeInfo, elem *rng.Element, seenFields map[string]bool, refElem map[string]string) {
 	for _, group := range elem.Group {
 		addGroupElements(typeInfo, &group, seenFields)
-		addGroupRefs(typeInfo, &group, seenFields)
+		addGroupRefs(typeInfo, &group, seenFields, refElem)
 		addGroupText(typeInfo, &group, seenFields)
 		addGroupList(typeInfo, &group, seenFields)
 	}
@@ -568,14 +590,14 @@ func addGroupElements(typeInfo *TypeInfo, group *rng.Group, seenFields map[strin
 	}
 }
 
-func addGroupRefs(typeInfo *TypeInfo, group *rng.Group, seenFields map[string]bool) {
+func addGroupRefs(typeInfo *TypeInfo, group *rng.Group, seenFields map[string]bool, refElem map[string]string) {
 	for _, ref := range group.Ref {
 		fieldName := toGoFieldName(ref.Name)
 		if !seenFields[fieldName] {
 			typeInfo.Fields = append(typeInfo.Fields, FieldInfo{
 				Name:   fieldName,
-				Type:   toGoTypeName(ref.Name),
-				XMLTag: fmt.Sprintf("`xml:\"%s\"`", sanitizeRefName(ref.Name)),
+				Type:   toGoTypeName(refXMLName(refElem, ref.Name)),
+				XMLTag: fmt.Sprintf("`xml:\"%s\"`", sanitizeRefName(refXMLName(refElem, ref.Name))),
 			})
 			seenFields[fieldName] = true
 		}
@@ -610,21 +632,21 @@ func addGroupList(typeInfo *TypeInfo, group *rng.Group, seenFields map[string]bo
 	}
 }
 
-func addZeroOrMoreFields(typeInfo *TypeInfo, elem *rng.Element, seenFields map[string]bool) {
+func addZeroOrMoreFields(typeInfo *TypeInfo, elem *rng.Element, seenFields map[string]bool, refElem map[string]string) {
 	for _, zeroOrMore := range elem.ZeroOrMore {
-		addZeroOrMoreRefs(typeInfo, &zeroOrMore, seenFields)
+		addZeroOrMoreRefs(typeInfo, &zeroOrMore, seenFields, refElem)
 		addZeroOrMoreElements(typeInfo, &zeroOrMore, seenFields)
 	}
 }
 
-func addZeroOrMoreRefs(typeInfo *TypeInfo, zeroOrMore *rng.ZeroOrMore, seenFields map[string]bool) {
+func addZeroOrMoreRefs(typeInfo *TypeInfo, zeroOrMore *rng.ZeroOrMore, seenFields map[string]bool, refElem map[string]string) {
 	for _, ref := range zeroOrMore.Ref {
 		fieldName := toGoFieldName(ref.Name)
 		if !seenFields[fieldName] {
 			typeInfo.Fields = append(typeInfo.Fields, FieldInfo{
 				Name:   fieldName,
-				Type:   "[]" + toGoTypeName(ref.Name),
-				XMLTag: fmt.Sprintf("`xml:\"%s\"`", sanitizeRefName(ref.Name)),
+				Type:   "[]" + toGoTypeName(refXMLName(refElem, ref.Name)),
+				XMLTag: fmt.Sprintf("`xml:\"%s\"`", sanitizeRefName(refXMLName(refElem, ref.Name))),
 			})
 			seenFields[fieldName] = true
 		}

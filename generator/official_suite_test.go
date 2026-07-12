@@ -180,16 +180,6 @@ func runOfficialIntegrationTest(t *testing.T, schemaPath, xmlPath string, should
 		return result
 	}
 
-	// Nested grammars cannot be round-tripped through SerializeGrammar (the
-	// outer element is dropped), so the schema the generated code embeds is not
-	// faithful and its self-validation disagrees with the standalone validator.
-	// This is a generator/serializer limitation, unrelated to the validator, so
-	// skip the cross-check here; the standalone validator handles these cases.
-	if src, e := os.ReadFile(absSchemaPath); e == nil && bytes.Count(src, []byte("<grammar")) > 1 {
-		result.Skipped = true
-		return result
-	}
-
 	val := validator.NewValidator(grammar, validator.DefaultOptions())
 	reader := bytes.NewReader(xmlContent)
 	errors, err := val.Validate(reader)
