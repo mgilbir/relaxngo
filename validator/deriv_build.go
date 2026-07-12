@@ -117,9 +117,12 @@ func buildGrammar(g *rng.Grammar) (pat, map[string]pat, error) {
 	// <include ns="..."> applies that namespace to the included element names in
 	// structured fields only, which this RawContent-based path would miss — so
 	// defer those.
+	// Nested grammars unpack into structured fields differently depending on the
+	// parse path (file resolver vs in-memory), so the builder reproduces them
+	// unreliably; defer them to the legacy engine.
 	if raw := string(g.RawContent); strings.Contains(raw, "<externalRef") ||
 		strings.Contains(raw, "<div") ||
-		strings.Contains(raw, "<grammar") || // nested grammar (unpacked into structured fields)
+		strings.Contains(raw, "<grammar") ||
 		strings.Contains(raw, "parentRef") ||
 		includeUsesNs(raw) {
 		return nil, nil, errUnsupported
@@ -422,13 +425,14 @@ func (b *builder) elementFromStruct(el *rng.Element, ctx bctx) (pat, error) {
 	}
 
 	if len(bytes.TrimSpace(el.RawContent)) == 0 {
-		// Empty raw content is either a genuinely empty element or one whose
+		// Empty raw content: either a genuinely empty element or one whose
 		// content the parser moved into structured fields (nested-grammar
-		// unpacking, which this path does not read). Defer the latter.
-		if elementHasStructuredContent(el) {
-			return nil, errUnsupported
+		// unpacking). Build from the structured fields.
+		content, err := b.structuredElementContent(el, childCtx)
+		if err != nil {
+			return nil, err
 		}
-		return pElem{nc: nc, p: empty}, nil
+		return pElem{nc: nc, p: content}, nil
 	}
 	// When the element uses a name-class child (<name>/<anyName>/<nsName>/choice
 	// of names) rather than a name attribute, that child is the first thing in
@@ -536,14 +540,101 @@ func foreignElem(se xml.StartElement) bool {
 	return se.Name.Space != "" && se.Name.Space != relaxNGNamespace
 }
 
-// elementHasStructuredContent reports whether an element carries content in
-// structured fields (as opposed to RawContent).
-func elementHasStructuredContent(el *rng.Element) bool {
-	return el.Text != nil || el.Data != nil || len(el.Values) > 0 || el.List != nil ||
-		len(el.Ref) > 0 || len(el.ParentRef) > 0 || len(el.Elements) > 0 ||
-		el.Choice != nil || len(el.Group) > 0 || len(el.Interleave) > 0 ||
-		len(el.Optional) > 0 || len(el.OneOrMore) > 0 || len(el.ZeroOrMore) > 0 ||
-		el.Mixed != nil || el.Empty != nil || el.NotAllowed != nil || len(el.Attributes) > 0
+// structuredElementContent builds an element's content pattern from its
+// structured fields, used when RawContent is empty (e.g. after nested-grammar
+// unpacking). It defers on containers whose structured representation is
+// incomplete (optional/oneOrMore/zeroOrMore/mixed/list only partially populate
+// structured fields) and on parentRef.
+func (b *builder) structuredElementContent(el *rng.Element, ctx bctx) (pat, error) {
+	if len(el.Optional) > 0 || len(el.OneOrMore) > 0 || len(el.ZeroOrMore) > 0 ||
+		el.Mixed != nil || el.List != nil || len(el.ParentRef) > 0 || len(el.Attributes) > 0 {
+		return nil, errUnsupported
+	}
+	var parts []pat
+	for i := range el.Elements {
+		p, err := b.elementFromStruct(&el.Elements[i], ctx)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, p)
+	}
+	for _, ref := range el.Ref {
+		parts = append(parts, pRef{ref.Name})
+	}
+	if el.Choice != nil {
+		p, err := b.choiceStruct(el.Choice, ctx)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, p)
+	}
+	for i := range el.Group {
+		p, err := b.groupStruct(&el.Group[i], ctx)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, p)
+	}
+	for i := range el.Interleave {
+		p, err := b.interleaveStruct(&el.Interleave[i], ctx)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, p)
+	}
+	if el.Text != nil {
+		parts = append(parts, anyText)
+	}
+	if el.Data != nil {
+		parts = append(parts, b.dataStruct(el.Data, ctx))
+	}
+	for i := range el.Values {
+		parts = append(parts, valueStruct(&el.Values[i], ctx))
+	}
+	if el.Empty != nil {
+		parts = append(parts, empty)
+	}
+	if el.NotAllowed != nil {
+		parts = append(parts, notAllowed)
+	}
+	if len(parts) == 0 {
+		return empty, nil
+	}
+	return groupAll(parts), nil
+}
+
+// dataStruct builds a data pattern from a structured rng.Data. Params and a
+// simple <except> (values/data alternatives) are translated.
+func (b *builder) dataStruct(d *rng.Data, ctx bctx) pat {
+	lib := ctx.dtl
+	if d.DatatypeLibrary != "" {
+		lib = d.DatatypeLibrary
+	}
+	pd := pData{typ: strings.TrimSpace(d.Type), lib: lib}
+	for _, pm := range d.Params {
+		pd.params = append(pd.params, dParam{name: pm.Name, value: pm.Value})
+	}
+	if d.Except != nil {
+		var alts []pat
+		for i := range d.Except.Values {
+			alts = append(alts, valueStruct(&d.Except.Values[i], ctx))
+		}
+		for i := range d.Except.Data {
+			alts = append(alts, b.dataStruct(&d.Except.Data[i], ctx))
+		}
+		if len(alts) > 0 {
+			pd.except = choiceAll(alts)
+		}
+	}
+	return pd
+}
+
+func valueStruct(v *rng.Value, ctx bctx) pat {
+	lib := ctx.dtl
+	if v.DatatypeLibrary != "" {
+		lib = v.DatatypeLibrary
+	}
+	return pValue{typ: strings.TrimSpace(v.Type), lib: lib, value: v.Value}
 }
 
 func ncFromElementStruct(el *rng.Element, ctx bctx) (nameClass, error) {

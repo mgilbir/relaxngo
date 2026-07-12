@@ -56,3 +56,23 @@ func writeFile(t *testing.T, dir, name, content string) {
 		t.Fatal(err)
 	}
 }
+
+// TestDeriv_ElementRootNestedGrammar checks that an element-root schema whose
+// content is a nested grammar (unpacked by the parser into structured fields
+// with empty RawContent) is built from those structured fields and validates.
+func TestDeriv_ElementRootNestedGrammar(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "s.rng", `<element xmlns="http://relaxng.org/ns/structure/1.0" name="foo">
+  <grammar><start><text/></start></grammar>
+</element>`)
+	g, err := rng.ParseSchemaFile(filepath.Join(dir, "s.rng"), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := NewValidator(g, DefaultOptions())
+	if v.deriv == nil {
+		t.Fatal("element-root nested grammar should build on the derivative engine")
+	}
+	valid(t, v, `<foo>hi</foo>`)
+	invalid(t, v, `<foo><bar/></foo>`)
+}
