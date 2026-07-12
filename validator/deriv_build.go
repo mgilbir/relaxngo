@@ -22,6 +22,26 @@ import (
 
 var errUnsupported = errors.New("derivative builder: unsupported construct")
 
+// includeUsesNs reports whether any <include> tag in raw carries an ns
+// attribute (which the parser applies to structured fields only).
+func includeUsesNs(raw string) bool {
+	for i := 0; ; {
+		j := strings.Index(raw[i:], "<include")
+		if j < 0 {
+			return false
+		}
+		start := i + j
+		end := strings.Index(raw[start:], ">")
+		if end < 0 {
+			return false
+		}
+		if strings.Contains(raw[start:start+end], " ns=") {
+			return true
+		}
+		i = start + end + 1
+	}
+}
+
 // bctx is the inherited context while walking a pattern's raw XML.
 type bctx struct {
 	ns  string // inherited target namespace for element/attribute names
@@ -49,11 +69,16 @@ func buildGrammar(g *rng.Grammar) (pat, map[string]pat, error) {
 	// this builder reads. Defer such grammars to the legacy engine rather than
 	// translate them from stale raw content. (combine-merged defines, whose
 	// RawContent is likewise empty, are handled below from structured fields.)
-	if raw := string(g.RawContent); strings.Contains(raw, "<include") ||
-		strings.Contains(raw, "<externalRef") ||
+	// An <include> without a namespace merges its content into the top-level
+	// start/defines with faithful RawContent, so it can be built normally. An
+	// <include ns="..."> applies that namespace to the included element names in
+	// structured fields only, which this RawContent-based path would miss — so
+	// defer those.
+	if raw := string(g.RawContent); strings.Contains(raw, "<externalRef") ||
 		strings.Contains(raw, "<div") ||
 		strings.Contains(raw, "<grammar") || // nested grammar (unpacked into structured fields)
-		strings.Contains(raw, "parentRef") {
+		strings.Contains(raw, "parentRef") ||
+		includeUsesNs(raw) {
 		return nil, nil, errUnsupported
 	}
 
