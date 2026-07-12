@@ -8,6 +8,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/mgilbir/relaxngo/rng"
 )
@@ -52,17 +53,19 @@ func (v *Validator) validateDerivative(data []byte) ([]ValidationError, error) {
 		return nil, fmt.Errorf("XML parsing error: %w", err)
 	}
 	if root == nil {
-		return []ValidationError{{Message: "document has no root element"}}, nil
+		return []ValidationError{{Path: "/", Message: "document has no root element"}}, nil
 	}
 
 	d := &deriver{defines: v.deriv.defines, dtx: &validationContext{options: v.options}}
 	var errs []ValidationError
-	res := d.childDerivErr(v.deriv.start, childNode{elem: root}, &errs)
+	rootPath := []string{root.local}
+	res := d.childDerivErr(v.deriv.start, childNode{elem: root}, rootPath, &errs)
 	if !d.nullable(res) && len(errs) == 0 {
-		errs = append(errs, ValidationError{
-			Line: root.line, Column: root.col, Element: root.local,
-			Message: fmt.Sprintf("element '%s' does not match the schema", root.local),
-		})
+		ve := errFor(root, rootPath)
+		ve.Found = root.local
+		ve.Expected = d.expectedElemNames(v.deriv.start)
+		ve.Message = fmt.Sprintf("element '%s' does not match the schema", root.local)
+		errs = append(errs, ve)
 	}
 	// Only the first (deepest) located failure is meaningful; the derivative
 	// carries no notion of "more errors".
@@ -74,51 +77,70 @@ func (v *Validator) validateDerivative(data []byte) ([]ValidationError, error) {
 
 // ---- error-localizing derivative walk --------------------------------------
 
-func (d *deriver) childDerivErr(p pat, c childNode, errs *[]ValidationError) pat {
+// childDerivErr derives p over child c. path is the element path up to and
+// including c (for a text node it is the containing element's path).
+func (d *deriver) childDerivErr(p pat, c childNode, path []string, errs *[]ValidationError) pat {
 	if c.isText {
 		return d.textDeriv(p, c.text)
 	}
 	e := c.elem
 	p1 := d.startTagOpenDeriv(p, e.ns, e.local)
 	if isNotAllowed(p1) {
+		ve := errFor(e, path)
+		ve.Found = e.local
 		if wantNs, ok := d.expectedElemNs(p, e.local); ok && wantNs != e.ns {
-			d.report(errs, e, fmt.Sprintf("element '%s' has namespace %q, expected %q", e.local, e.ns, wantNs))
+			ve.Expected = []string{wantNs}
+			ve.Found = e.ns
+			ve.Message = fmt.Sprintf("element '%s' has namespace %q, expected %q", e.local, e.ns, wantNs)
 		} else {
-			d.report(errs, e, fmt.Sprintf("unexpected element '%s'", e.local))
+			ve.Expected = d.expectedElemNames(p)
+			ve.Message = fmt.Sprintf("unexpected element '%s'", e.local)
 		}
+		d.reportErr(errs, ve)
 		return notAllowed
 	}
-	p2 := d.attsDerivErr(p1, e, errs)
+	p2 := d.attsDerivErr(p1, e, path, errs)
 	if isNotAllowed(p2) {
 		return notAllowed
 	}
 	p3 := d.startTagCloseDeriv(p2)
 	if isNotAllowed(p3) {
-		if names := d.requiredAttrNames(p2); len(names) > 0 {
-			d.report(errs, e, fmt.Sprintf("missing required attribute '%s' on element '%s'", names[0], e.local))
+		ve := errFor(e, path)
+		names := d.requiredAttrNames(p2)
+		ve.Expected = names
+		if len(names) > 0 {
+			ve.Message = fmt.Sprintf("missing required attribute '%s' on element '%s'", names[0], e.local)
 		} else {
-			d.report(errs, e, fmt.Sprintf("missing required attribute on element '%s'", e.local))
+			ve.Message = fmt.Sprintf("missing required attribute on element '%s'", e.local)
 		}
+		d.reportErr(errs, ve)
 		return notAllowed
 	}
-	p4 := d.childrenDerivErr(p3, e, errs)
+	p4 := d.childrenDerivErr(p3, e, path, errs)
 	if isNotAllowed(p4) {
 		return notAllowed
 	}
 	p5 := d.endTagDeriv(p4)
 	if isNotAllowed(p5) {
-		d.report(errs, e, fmt.Sprintf("incomplete or invalid content in element '%s'", e.local))
+		ve := errFor(e, path)
+		ve.Expected = d.expectedElemNames(p4)
+		ve.Message = fmt.Sprintf("incomplete or invalid content in element '%s'", e.local)
+		d.reportErr(errs, ve)
 		return notAllowed
 	}
 	return p5
 }
 
-func (d *deriver) attsDerivErr(p pat, e *elemNode, errs *[]ValidationError) pat {
+func (d *deriver) attsDerivErr(p pat, e *elemNode, path []string, errs *[]ValidationError) pat {
 	for i := range e.atts {
 		a := e.atts[i]
 		np := d.attDeriv(p, a.ns, a.local, a.value)
 		if isNotAllowed(np) {
-			d.report(errs, e, fmt.Sprintf("unexpected or invalid attribute '%s' on element '%s'", a.local, e.local))
+			ve := errFor(e, path)
+			ve.Found = a.local
+			ve.Expected = d.requiredAttrNames(p)
+			ve.Message = fmt.Sprintf("unexpected or invalid attribute '%s' on element '%s'", a.local, e.local)
+			d.reportErr(errs, ve)
 			return notAllowed
 		}
 		p = np
@@ -126,7 +148,7 @@ func (d *deriver) attsDerivErr(p pat, e *elemNode, errs *[]ValidationError) pat 
 	return p
 }
 
-func (d *deriver) childrenDerivErr(p pat, e *elemNode, errs *[]ValidationError) pat {
+func (d *deriver) childrenDerivErr(p pat, e *elemNode, path []string, errs *[]ValidationError) pat {
 	children := e.children
 	// An element with no child nodes has an (empty) string value: it may match
 	// empty content, or a text/data/value pattern against the empty string.
@@ -142,16 +164,38 @@ func (d *deriver) childrenDerivErr(p pat, e *elemNode, errs *[]ValidationError) 
 		}
 		np := d.textDeriv(p, s)
 		if isNotAllowed(np) {
-			d.report(errs, e, fmt.Sprintf("invalid text content in element '%s'", e.local))
+			ve := errFor(e, path)
+			ve.Found = strings.TrimSpace(s)
+			ve.Message = fmt.Sprintf("invalid text content in element '%s'", e.local)
+			d.reportErr(errs, ve)
 		}
 		return np
 	}
+	// Pre-count element children by name so that a name occurring more than once
+	// gets a 1-based [index] in the path (disambiguating repeated siblings).
+	nameCount := map[string]int{}
+	for i := range children {
+		if !children[i].isText {
+			nameCount[children[i].elem.local]++
+		}
+	}
+	occ := map[string]int{}
 	for i := range children {
 		c := children[i]
 		if c.isText && isWhitespace(c.text) {
 			continue // whitespace between elements is not significant
 		}
-		p = d.childDerivErr(p, c, errs)
+		childPath := path
+		if !c.isText {
+			name := c.elem.local
+			occ[name]++
+			seg := name
+			if nameCount[name] > 1 {
+				seg = fmt.Sprintf("%s[%d]", name, occ[name])
+			}
+			childPath = append(append([]string{}, path...), seg)
+		}
+		p = d.childDerivErr(p, c, childPath, errs)
 		if isNotAllowed(p) {
 			return notAllowed
 		}
@@ -159,11 +203,26 @@ func (d *deriver) childrenDerivErr(p pat, e *elemNode, errs *[]ValidationError) 
 	return p
 }
 
-func (d *deriver) report(errs *[]ValidationError, e *elemNode, msg string) {
+// errFor pre-fills the location fields of a ValidationError from an element node
+// and its path. Callers set Message and, where known, Expected/Found.
+func errFor(e *elemNode, path []string) ValidationError {
+	return ValidationError{
+		Line:    e.line,
+		Column:  e.col,
+		Element: e.local,
+		Path:    pathString(path),
+	}
+}
+
+func pathString(path []string) string {
+	return "/" + strings.Join(path, "/")
+}
+
+func (d *deriver) reportErr(errs *[]ValidationError, ve ValidationError) {
 	if len(*errs) > 0 {
 		return // keep the deepest/first located failure
 	}
-	*errs = append(*errs, ValidationError{Line: e.line, Column: e.col, Element: e.local, Message: msg})
+	*errs = append(*errs, ve)
 }
 
 // ---- document tree construction --------------------------------------------
