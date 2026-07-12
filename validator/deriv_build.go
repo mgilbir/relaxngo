@@ -97,6 +97,61 @@ type builder struct {
 	built        map[string]pat         // memoized define patterns
 	building     map[string]bool        // cycle guard while building defines
 	preferStruct bool                   // build names from structured fields (div/include applied a namespace)
+	wrapDecls    string                 // xmlns declarations to re-scope over RawContent (when RELAX NG is prefixed)
+}
+
+const nsWrapper = "_relaxngo_ns_"
+
+// rawDecoder returns a decoder over raw. When the grammar prefixes the RELAX NG
+// namespace, raw is wrapped in a synthetic element carrying the grammar's xmlns
+// declarations so element/attribute prefixes resolve; the returned wrapperLocal
+// is the wrapper's local name (empty when no wrapping) and the decoder is
+// positioned just after the wrapper's start tag.
+func (b *builder) rawDecoder(raw []byte) (*xml.Decoder, string) {
+	if b.wrapDecls == "" {
+		return xml.NewDecoder(bytes.NewReader(raw)), ""
+	}
+	wrapped := "<" + nsWrapper + b.wrapDecls + ">" + string(raw) + "</" + nsWrapper + ">"
+	dec := xml.NewDecoder(strings.NewReader(wrapped))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		if _, ok := tok.(xml.StartElement); ok {
+			break
+		}
+	}
+	return dec, nsWrapper
+}
+
+// foreign reports whether se is a foreign (non-RELAX NG) element. When RawContent
+// is re-scoped with the grammar's namespaces (wrapDecls), structural elements
+// carry the RELAX NG namespace and anything else is foreign; otherwise a
+// non-empty namespace other than RELAX NG marks foreign content.
+func (b *builder) foreign(se xml.StartElement) bool {
+	if b.wrapDecls != "" {
+		return se.Name.Space != relaxNGNamespace
+	}
+	return se.Name.Space != "" && se.Name.Space != relaxNGNamespace
+}
+
+// nsDeclsString renders the xmlns declarations in attrs as attribute text and
+// reports whether any prefix is bound to the RELAX NG namespace.
+func nsDeclsString(attrs []xml.Attr) (decls string, prefixesRNG bool) {
+	var sb strings.Builder
+	for _, a := range attrs {
+		switch {
+		case a.Name.Space == "" && a.Name.Local == "xmlns":
+			sb.WriteString(` xmlns="` + a.Value + `"`)
+		case a.Name.Space == "xmlns":
+			sb.WriteString(` xmlns:` + a.Name.Local + `="` + a.Value + `"`)
+			if a.Value == relaxNGNamespace {
+				prefixesRNG = true
+			}
+		}
+	}
+	return sb.String(), prefixesRNG
 }
 
 // buildGrammar translates a grammar into (start pattern, define env). It returns
@@ -130,6 +185,12 @@ func buildGrammar(g *rng.Grammar) (pat, map[string]pat, error) {
 	// fields rather than the (unnamespaced) RawContent for these grammars.
 	if strings.Contains(raw, "<div") || includeUsesNs(raw) {
 		b.preferStruct = true
+	}
+	// If the grammar binds the RELAX NG namespace to a prefix (e.g. <rng:element>),
+	// re-scope RawContent with the grammar's xmlns declarations so those prefixes
+	// resolve when it is re-parsed.
+	if decls, prefixesRNG := nsDeclsString(g.RawAttrs); prefixesRNG {
+		b.wrapDecls = decls
 	}
 
 	grammarDTL := g.DatatypeLibrary
@@ -490,7 +551,7 @@ func (b *builder) elementFromStruct(el *rng.Element, ctx bctx) (pat, error) {
 // with a name-class child (the element used a name-class form the structured
 // fields did not capture, e.g. a choice of names) followed by content.
 func (b *builder) elementFromRawContent(raw []byte, ctx bctx) (pat, error) {
-	dec := xml.NewDecoder(bytes.NewReader(raw))
+	dec, wrap := b.rawDecoder(raw)
 	var nc nameClass
 	haveNC := false
 	var parts []pat
@@ -499,11 +560,14 @@ func (b *builder) elementFromRawContent(raw []byte, ctx bctx) (pat, error) {
 		if err != nil {
 			break
 		}
+		if ee, ok := tok.(xml.EndElement); ok && wrap != "" && ee.Name.Local == wrap {
+			break
+		}
 		se, ok := tok.(xml.StartElement)
 		if !ok {
 			continue
 		}
-		if foreignElem(se) {
+		if b.foreign(se) {
 			if err := skipElement(dec, se); err != nil {
 				return nil, err
 			}
@@ -535,7 +599,7 @@ func (b *builder) elementFromRawContent(raw []byte, ctx bctx) (pat, error) {
 // parseElementContent parses an element's content from RawContent, optionally
 // skipping a leading name-class child that has already been translated.
 func (b *builder) parseElementContent(raw []byte, ctx bctx, skipNameClass bool) (pat, error) {
-	dec := xml.NewDecoder(bytes.NewReader(raw))
+	dec, wrap := b.rawDecoder(raw)
 	var parts []pat
 	skipped := !skipNameClass
 	for {
@@ -543,11 +607,14 @@ func (b *builder) parseElementContent(raw []byte, ctx bctx, skipNameClass bool) 
 		if err != nil {
 			break
 		}
+		if ee, ok := tok.(xml.EndElement); ok && wrap != "" && ee.Name.Local == wrap {
+			break
+		}
 		se, ok := tok.(xml.StartElement)
 		if !ok {
 			continue
 		}
-		if foreignElem(se) {
+		if b.foreign(se) {
 			if err := skipElement(dec, se); err != nil {
 				return nil, err
 			}
@@ -573,14 +640,6 @@ func (b *builder) parseElementContent(raw []byte, ctx bctx, skipNameClass bool) 
 
 // relaxNGNamespace is the RELAX NG structure namespace.
 const relaxNGNamespace = "http://relaxng.org/ns/structure/1.0"
-
-// foreignElem reports whether se is a foreign-namespace (annotation) element,
-// which RELAX NG ignores. Structural elements are either in the RELAX NG
-// namespace or (when RawContent is re-parsed without the ancestor xmlns in
-// scope) in no namespace; anything else is a foreign annotation.
-func foreignElem(se xml.StartElement) bool {
-	return se.Name.Space != "" && se.Name.Space != relaxNGNamespace
-}
 
 // structuredElementContent builds an element's content pattern from its
 // structured fields, used when RawContent is empty (e.g. after nested-grammar
@@ -765,18 +824,21 @@ func exceptNameClassFromStruct(ne *rng.NameExcept, ctx bctx) (nameClass, error) 
 // parseSeq parses a run of sibling patterns (the inner content of a container)
 // and returns their group. An empty run is pEmpty.
 func (b *builder) parseSeq(raw []byte, ctx bctx) (pat, error) {
-	dec := xml.NewDecoder(bytes.NewReader(raw))
+	dec, wrap := b.rawDecoder(raw)
 	var parts []pat
 	for {
 		tok, err := dec.Token()
 		if err != nil {
 			break // io.EOF ends the sibling run
 		}
+		if ee, ok := tok.(xml.EndElement); ok && wrap != "" && ee.Name.Local == wrap {
+			break
+		}
 		se, ok := tok.(xml.StartElement)
 		if !ok {
 			continue // whitespace/chardata/comments between patterns
 		}
-		if foreignElem(se) {
+		if b.foreign(se) {
 			if err := skipElement(dec, se); err != nil {
 				return nil, err
 			}
@@ -870,7 +932,7 @@ func (b *builder) parseChildren(dec *xml.Decoder, se xml.StartElement, ctx bctx)
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
-			if foreignElem(t) {
+			if b.foreign(t) {
 				if err := skipElement(dec, t); err != nil {
 					return nil, err
 				}
@@ -962,7 +1024,7 @@ func (b *builder) elementNameClass(dec *xml.Decoder, se xml.StartElement, ctx bc
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
-			if foreignElem(t) {
+			if b.foreign(t) {
 				if err := skipElement(dec, t); err != nil {
 					return nil, nil, err
 				}
@@ -1001,7 +1063,7 @@ func (b *builder) attrNameClass(dec *xml.Decoder, se xml.StartElement, actx, con
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
-			if foreignElem(t) {
+			if b.foreign(t) {
 				if err := skipElement(dec, t); err != nil {
 					return nil, nil, err
 				}
@@ -1146,7 +1208,7 @@ func (b *builder) parseData(dec *xml.Decoder, se xml.StartElement, ctx bctx) (pa
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
-			if foreignElem(t) {
+			if b.foreign(t) {
 				if err := skipElement(dec, t); err != nil {
 					return nil, err
 				}
