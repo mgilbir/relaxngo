@@ -37,25 +37,60 @@ type DiskResolver struct {
 	BaseDir string // Base directory for resolving relative paths
 }
 
+// maxResourceBytes bounds the size of a single schema resource (include or
+// externalRef) to prevent a hostile or accidental huge file from exhausting
+// memory during schema loading.
+const maxResourceBytes = 50 * 1024 * 1024 // 50MB
+
 // ReadResource implements ResourceResolver for disk-based resources.
+//
+// All reads are confined to BaseDir: the resolved target — whether the href is
+// relative or absolute — must lie within BaseDir, and traversal via ".." or
+// symlinks that would escape it is rejected. This prevents an untrusted schema
+// from reading arbitrary files via <include>/<externalRef>.
 func (r *DiskResolver) ReadResource(path string) ([]byte, error) {
-	var fullPath string
-
-	// Security: prevent directory traversal for all paths
-	cleanPath := filepath.Clean(path)
-	if strings.Contains(cleanPath, "..") {
-		return nil, fmt.Errorf("parent directory references not allowed: %s", path)
+	base := r.BaseDir
+	if base == "" {
+		base = "."
 	}
 
-	// If path is absolute, use it directly (for root-level files)
+	// Interpret the requested path relative to BaseDir. Absolute paths are
+	// re-expressed relative to BaseDir so they cannot silently escape it; if
+	// they point outside, os.Root rejects them below.
+	rel := path
 	if filepath.IsAbs(path) {
-		fullPath = cleanPath
-	} else {
-		// Resolve relative to base directory
-		fullPath = filepath.Join(r.BaseDir, cleanPath)
+		absBase, err := filepath.Abs(base)
+		if err != nil {
+			return nil, err
+		}
+		rel, err = filepath.Rel(absBase, path)
+		if err != nil {
+			return nil, fmt.Errorf("resource path escapes base directory %q: %s", base, path)
+		}
 	}
 
-	return os.ReadFile(fullPath) //nolint:gosec // Path is validated above for directory traversal
+	// os.Root confines all path resolution (including via ".." and symlinks) to
+	// base at the OS level.
+	root, err := os.OpenRoot(base)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+
+	f, err := root.Open(filepath.Clean(rel))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxResourceBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxResourceBytes {
+		return nil, fmt.Errorf("schema resource %q exceeds maximum size of %d bytes", path, maxResourceBytes)
+	}
+	return data, nil
 }
 
 // Grammar represents a RELAX NG grammar element containing the schema definition.
