@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/mgilbir/relaxngo/validator"
+	"github.com/mgilbir/relaxngo/internal/conformance"
 )
 
 func main() {
@@ -28,18 +28,18 @@ func main() {
 	printFailedDetails(failed)
 }
 
-func loadAndConvertTests(testFolderPath string) ([]validator.TestResult, error) {
-	tests, err := validator.LoadTestsFromFolder(testFolderPath)
+func loadAndConvertTests(testFolderPath string) ([]conformance.TestResult, error) {
+	tests, err := conformance.LoadTestsFromFolder(testFolderPath)
 	if err != nil {
 		return nil, err
 	}
 
-	return validator.ConvertFolderTestsToResults(tests)
+	return conformance.ConvertFolderTestsToResults(tests)
 }
 
-func organizeResults(results []validator.TestResult) (map[int][]validator.TestResult, map[int][]validator.TestResult) {
-	passed := make(map[int][]validator.TestResult)
-	failed := make(map[int][]validator.TestResult)
+func organizeResults(results []conformance.TestResult) (map[int][]conformance.TestResult, map[int][]conformance.TestResult) {
+	passed := make(map[int][]conformance.TestResult)
+	failed := make(map[int][]conformance.TestResult)
 
 	for _, r := range results {
 		var testNum int
@@ -55,7 +55,7 @@ func organizeResults(results []validator.TestResult) (map[int][]validator.TestRe
 	return passed, failed
 }
 
-func printSummary(passed, failed map[int][]validator.TestResult) {
+func printSummary(passed, failed map[int][]conformance.TestResult) {
 	fmt.Println("\n=== Test Summary by Number ===")
 	fmt.Println("(T-XXX: P=Passed, F=Failed, Total documents)")
 	fmt.Println()
@@ -66,7 +66,7 @@ func printSummary(passed, failed map[int][]validator.TestResult) {
 	fmt.Printf("\nTotal: %d passed, %d failed out of %d tests\n", passCount, failCount, passCount+failCount)
 }
 
-func getSortedTestNumbers(passed, failed map[int][]validator.TestResult) []int {
+func getSortedTestNumbers(passed, failed map[int][]conformance.TestResult) []int {
 	var allNums []int
 	seen := make(map[int]bool)
 	for num := range passed {
@@ -85,7 +85,7 @@ func getSortedTestNumbers(passed, failed map[int][]validator.TestResult) []int {
 	return allNums
 }
 
-func printTestResults(allNums []int, passed, failed map[int][]validator.TestResult) (int, int) {
+func printTestResults(allNums []int, passed, failed map[int][]conformance.TestResult) (int, int) {
 	passCount := 0
 	failCount := 0
 
@@ -106,7 +106,7 @@ func printTestResults(allNums []int, passed, failed map[int][]validator.TestResu
 	return passCount, failCount
 }
 
-func printFailedDetails(failed map[int][]validator.TestResult) {
+func printFailedDetails(failed map[int][]conformance.TestResult) {
 	fmt.Println("\n=== Failed Tests Details ===")
 	failCount := 0
 

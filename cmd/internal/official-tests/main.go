@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/mgilbir/relaxngo/validator"
+	"github.com/mgilbir/relaxngo/internal/conformance"
 )
 
 func main() {
@@ -34,14 +34,14 @@ func main() {
 	fmt.Printf("Using folder-based tests from: %s\n", testFolderPath)
 
 	// Load tests from numbered folders
-	tests, err := validator.LoadTestsFromFolder(testFolderPath)
+	tests, err := conformance.LoadTestsFromFolder(testFolderPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading tests from folders: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Convert to results
-	results, err := validator.ConvertFolderTestsToResults(tests)
+	results, err := conformance.ConvertFolderTestsToResults(tests)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error converting tests to results: %v\n", err)
 		os.Exit(1)
@@ -49,14 +49,14 @@ func main() {
 
 	// Filter if requested
 	if *category != "" {
-		results = validator.FilterResults(results, *category)
+		results = conformance.FilterResults(results, *category)
 	}
 
 	// Display results
-	fmt.Print(validator.FormatResults(results, *verbose))
+	fmt.Print(conformance.FormatResults(results, *verbose))
 
 	// Exit with error if tests failed
-	_, failed, _ := validator.CountResults(results)
+	_, failed, _ := conformance.CountResults(results)
 	if failed > 0 {
 		os.Exit(1)
 	}
