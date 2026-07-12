@@ -249,6 +249,10 @@ func (v *Validator) Validate(r io.Reader) ([]ValidationError, error) {
 		}
 	}
 
+	// Reaching here means end-of-input without a document element. A
+	// well-formed XML document has exactly one root element, so empty or
+	// element-less input does not match any start pattern.
+	ctx.addError("", "document has no root element", nil, "")
 	return errors, nil
 }
 
