@@ -99,6 +99,7 @@ type Validator struct {
 	grammar *rng.Grammar
 	options ValidationOptions
 	defines map[string]*rng.Define
+	deriv   *derivEngine // derivative engine; nil when the grammar uses a construct it cannot translate
 }
 
 // NewValidator creates a validator from a parsed RELAX NG grammar.
@@ -112,6 +113,7 @@ func NewValidator(grammar *rng.Grammar, options ValidationOptions) *Validator {
 		grammar: grammar,
 		options: options,
 		defines: defines,
+		deriv:   buildDerivEngine(grammar),
 	}
 }
 
@@ -212,6 +214,17 @@ func (v *Validator) extractElementFromGroup(group *rng.Group) *rng.Element {
 
 // Validate validates an XML document and returns all validation errors.
 func (v *Validator) Validate(r io.Reader) ([]ValidationError, error) {
+	// Prefer the derivative engine when it was able to translate the grammar;
+	// it handles element order, interleave, attributes at every level, and name
+	// classes correctly. Grammars it cannot translate fall back below.
+	if v.deriv != nil && v.options.UsePatternAST {
+		data, err := io.ReadAll(r)
+		if err != nil {
+			return nil, err
+		}
+		return v.validateDerivative(data)
+	}
+
 	lineTracker := NewLineTracker(r)
 	decoder := xml.NewDecoder(lineTracker)
 	var errors []ValidationError

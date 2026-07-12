@@ -152,7 +152,7 @@ func TestValidator_DataTypes(t *testing.T) {
 	})
 
 	t.Run("invalid boolean", func(t *testing.T) {
-		runDataTypeTest(t, grammar, `<person age="30" active="maybe"/>`, true, "invalid type")
+		runDataTypeTest(t, grammar, `<person age="30" active="maybe"/>`, true, "active")
 	})
 }
 
