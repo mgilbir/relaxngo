@@ -295,6 +295,8 @@ func (b *builder) defineFromStruct(def *rng.Define, ctx bctx) (pat, error) {
 		return b.interleaveList(def.Interleave, ctx)
 	case len(def.Elements) > 0:
 		return b.elementsGroup(def.Elements, ctx)
+	case def.Element != nil: // deprecated singular field, still used by hand-built grammars
+		return b.elementFromStruct(def.Element, ctx)
 	case def.Ref != nil:
 		return pRef{def.Ref.Name}, nil
 	case def.ParentRef != nil:
@@ -652,10 +654,17 @@ const relaxNGNamespace = "http://relaxng.org/ns/structure/1.0"
 // structured fields) and on parentRef.
 func (b *builder) structuredElementContent(el *rng.Element, ctx bctx) (pat, error) {
 	if len(el.Optional) > 0 || len(el.OneOrMore) > 0 || len(el.ZeroOrMore) > 0 ||
-		el.Mixed != nil || el.List != nil || len(el.Attributes) > 0 {
+		el.Mixed != nil || el.List != nil {
 		return nil, errUnsupported
 	}
 	var parts []pat
+	for i := range el.Attributes {
+		p, err := b.attributeStruct(&el.Attributes[i], ctx)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, p)
+	}
 	for i := range el.Elements {
 		p, err := b.elementFromStruct(&el.Elements[i], ctx)
 		if err != nil {
@@ -735,6 +744,63 @@ func (b *builder) dataStruct(d *rng.Data, ctx bctx) pat {
 		}
 	}
 	return pd
+}
+
+// attributeStruct builds an attribute pattern from a structured rng.Attribute.
+func (b *builder) attributeStruct(a *rng.Attribute, ctx bctx) (pat, error) {
+	var nc nameClass
+	switch {
+	case a.Name != "":
+		if strings.Contains(a.Name, ":") {
+			return nil, errUnsupported
+		}
+		nc = ncName{ns: a.Ns, local: a.Name} // attribute names do not inherit the element namespace
+	case a.NameElement != nil:
+		local := a.NameElement.LocalName
+		if local == "" {
+			local = strings.TrimSpace(a.NameElement.Value)
+		}
+		nc = ncName{ns: a.NameElement.Namespace, local: local}
+	case a.AnyName != nil:
+		n, err := anyNameClassFromStruct(a.AnyName, ctx)
+		if err != nil {
+			return nil, err
+		}
+		nc = n
+	case a.NsName != nil:
+		n, err := nsNameClassFromStruct(a.NsName, ctx)
+		if err != nil {
+			return nil, err
+		}
+		nc = n
+	default:
+		return nil, errUnsupported
+	}
+
+	var valuePat pat
+	switch {
+	case a.Data != nil:
+		valuePat = b.dataStruct(a.Data, ctx)
+	case len(a.Values) > 0:
+		var alts []pat
+		for i := range a.Values {
+			alts = append(alts, valueStruct(&a.Values[i], ctx))
+		}
+		valuePat = choiceAll(alts)
+	case a.Choice != nil:
+		p, err := b.choiceStruct(a.Choice, ctx)
+		if err != nil {
+			return nil, err
+		}
+		valuePat = p
+	case a.Empty != nil:
+		valuePat = empty
+	case a.List != nil:
+		return nil, errUnsupported
+	default:
+		valuePat = anyText // <attribute name="x"/> allows any string
+	}
+	return pAttr{nc: nc, p: valuePat}, nil
 }
 
 func valueStruct(v *rng.Value, ctx bctx) pat {

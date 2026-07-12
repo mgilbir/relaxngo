@@ -213,60 +213,19 @@ func (v *Validator) extractElementFromGroup(group *rng.Group) *rng.Element {
 }
 
 // Validate validates an XML document and returns all validation errors.
+//
+// Validation uses the derivative algorithm (see deriv.go). If the schema uses a
+// construct the builder cannot translate it returns an error rather than a
+// (possibly wrong) result.
 func (v *Validator) Validate(r io.Reader) ([]ValidationError, error) {
-	// Prefer the derivative engine when it was able to translate the grammar;
-	// it handles element order, interleave, attributes at every level, and name
-	// classes correctly. Grammars it cannot translate fall back below.
-	if v.deriv != nil && v.options.UsePatternAST {
-		data, err := io.ReadAll(r)
-		if err != nil {
-			return nil, err
-		}
-		return v.validateDerivative(data)
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
 	}
-
-	lineTracker := NewLineTracker(r)
-	decoder := xml.NewDecoder(lineTracker)
-	var errors []ValidationError
-
-	// Get the start pattern - handle different pattern types
-	// getStartPattern always returns a non-nil element (possibly a permissive wildcard)
-	startPattern := v.getStartPattern()
-
-	ctx := &validationContext{
-		decoder:     decoder,
-		lineTracker: lineTracker,
-		path:        []string{},
-		errors:      &errors,
-		options:     v.options,
-		defines:     v.defines,
-		depth:       0,
+	if v.deriv == nil {
+		return nil, fmt.Errorf("validator: schema uses a construct that is not supported")
 	}
-
-	// Read tokens and validate against start element
-	for {
-		tok, err := decoder.Token()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("XML parsing error: %w", err)
-		}
-
-		switch t := tok.(type) {
-		case xml.StartElement:
-			ctx.validateElement(startPattern, &t)
-			return errors, nil
-		case xml.ProcInst, xml.Directive, xml.Comment:
-			continue
-		}
-	}
-
-	// Reaching here means end-of-input without a document element. A
-	// well-formed XML document has exactly one root element, so empty or
-	// element-less input does not match any start pattern.
-	ctx.addError("", "document has no root element", nil, "")
-	return errors, nil
+	return v.validateDerivative(data)
 }
 
 type validationContext struct {
