@@ -7,225 +7,102 @@ import (
 	"github.com/mgilbir/relaxngo/rng"
 )
 
-// runAnyNameTest validates an anyName test case
-func runAnyNameTest(t *testing.T, schema, xml string, wantValid bool) {
+// assertNameClass parses schema, validates xml, and asserts the outcome.
+// wantValid=true means the document must validate with no errors; false means it
+// must be rejected. A schema parse error or a hard validate error always fails
+// the test — these cases exercise supported constructs, so neither should occur.
+func assertNameClass(t *testing.T, schema, xml string, wantValid bool) {
+	t.Helper()
 	grammar, err := rng.ParseSchema(strings.NewReader(schema))
 	if err != nil {
-		t.Fatalf("failed to parse schema: %v", err)
+		t.Fatalf("parse schema: %v", err)
 	}
-
-	v := NewValidator(grammar, DefaultOptions())
-	errors, err := v.Validate(strings.NewReader(xml))
-
+	errs, err := NewValidator(grammar, DefaultOptions()).Validate(strings.NewReader(xml))
 	if err != nil {
-		t.Logf("validation error (acceptable): %v", err)
-		return
+		t.Fatalf("validate returned a hard error: %v", err)
 	}
-
-	if wantValid && len(errors) > 0 {
-		t.Logf("Expected valid but got errors (will be fixed with name class support): %v", errors)
+	switch {
+	case wantValid && len(errs) > 0:
+		t.Errorf("expected valid document, got errors: %v", errs)
+	case !wantValid && len(errs) == 0:
+		t.Error("expected invalid document, but validation passed")
 	}
 }
 
-// TestAnyNameValidation tests validation of anyName elements
+// TestAnyNameValidation covers <anyName/> as an element and attribute name class.
 func TestAnyNameValidation(t *testing.T) {
-	t.Run("anyName should accept any element", func(t *testing.T) {
-		schema := `<?xml version="1.0" encoding="UTF-8"?>
-<grammar xmlns="http://relaxng.org/ns/structure/1.0">
-  <start><ref name="container"/></start>
-  <define name="container">
-    <element name="container">
-      <zeroOrMore><anyName/></zeroOrMore>
-    </element>
-  </define>
+	t.Run("anyName accepts any element", func(t *testing.T) {
+		schema := `<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start><element name="container">
+    <zeroOrMore><element><anyName/><empty/></element></zeroOrMore>
+  </element></start>
 </grammar>`
-		xml := `<?xml version="1.0"?>
-<container>
-  <foo/>
-  <bar/>
-  <baz/>
-</container>`
-		runAnyNameTest(t, schema, xml, true)
+		assertNameClass(t, schema, `<container><foo/><bar/><baz/></container>`, true)
 	})
 
-	t.Run("anyName with attribute should accept any element with attributes", func(t *testing.T) {
-		schema := `<?xml version="1.0" encoding="UTF-8"?>
-<grammar xmlns="http://relaxng.org/ns/structure/1.0">
-  <start><ref name="container"/></start>
-  <define name="container">
-    <element name="container">
-      <zeroOrMore><attribute><anyName/></attribute></zeroOrMore>
-      <empty/>
-    </element>
-  </define>
+	t.Run("anyName accepts any attribute", func(t *testing.T) {
+		schema := `<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start><element name="container">
+    <zeroOrMore><attribute><anyName/></attribute></zeroOrMore>
+  </element></start>
 </grammar>`
-		xml := `<?xml version="1.0"?><container foo="bar" baz="qux"/>`
-		runAnyNameTest(t, schema, xml, true)
+		assertNameClass(t, schema, `<container foo="bar" baz="qux"/>`, true)
 	})
 }
 
-// TestNsNameValidation tests validation of nsName elements (namespace-specific)
+// TestNsNameValidation covers <nsName/> matching only elements in a namespace.
 func TestNsNameValidation(t *testing.T) {
-	tests := []struct {
-		name      string
-		schema    string
-		xml       string
-		wantValid bool
-	}{
-		{
-			name: "nsName should accept elements in specific namespace",
-			schema: `<?xml version="1.0" encoding="UTF-8"?>
-<grammar xmlns="http://relaxng.org/ns/structure/1.0">
-  <start>
-    <ref name="html"/>
-  </start>
-  <define name="html">
-    <element name="html" ns="http://www.w3.org/1999/xhtml">
-      <zeroOrMore>
-        <nsName ns="http://www.w3.org/1999/xhtml"/>
-      </zeroOrMore>
-    </element>
-  </define>
-</grammar>`,
-			xml: `<?xml version="1.0"?>
-<html xmlns="http://www.w3.org/1999/xhtml">
-  <head/>
-  <body/>
-</html>`,
-			wantValid: true,
-		},
-	}
+	const ns = "http://www.w3.org/1999/xhtml"
+	schema := `<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start><element name="html" ns="` + ns + `">
+    <zeroOrMore><element><nsName ns="` + ns + `"/><empty/></element></zeroOrMore>
+  </element></start>
+</grammar>`
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			grammar, err := rng.ParseSchema(strings.NewReader(tt.schema))
-			if err != nil {
-				t.Logf("failed to parse schema (expected for some tests): %v", err)
-				return
-			}
+	t.Run("accepts elements in the namespace", func(t *testing.T) {
+		assertNameClass(t, schema, `<html xmlns="`+ns+`"><head/><body/></html>`, true)
+	})
 
-			v := NewValidator(grammar, DefaultOptions())
-			errors, err := v.Validate(strings.NewReader(tt.xml))
-
-			if err != nil {
-				t.Logf("validation error (acceptable): %v", err)
-				return
-			}
-
-			if tt.wantValid && len(errors) > 0 {
-				t.Logf("Expected valid but got errors (will be fixed with name class support): %v", errors)
-			}
-		})
-	}
+	t.Run("rejects a child in a different namespace", func(t *testing.T) {
+		xml := `<html xmlns="` + ns + `"><child xmlns="http://example.com/other"/></html>`
+		assertNameClass(t, schema, xml, false)
+	})
 }
 
-// runNameClassExceptTest validates an except constraint test case
-func runNameClassExceptTest(t *testing.T, schema, xml string, wantValid bool, description string) {
-	grammar, err := rng.ParseSchema(strings.NewReader(schema))
-	if err != nil {
-		t.Logf("Note: %s (schema parsing may not support this yet): %v", description, err)
-		return
-	}
-
-	v := NewValidator(grammar, DefaultOptions())
-	errors, err := v.Validate(strings.NewReader(xml))
-
-	if err != nil {
-		t.Logf("validation error: %v", err)
-		return
-	}
-
-	if wantValid && len(errors) > 0 {
-		t.Logf("Expected valid but got errors (will be fixed with name class validation): %v", errors)
-	} else if !wantValid && len(errors) == 0 {
-		t.Logf("Expected invalid but validation passed (will be fixed with name class validation)")
-	}
-}
-
-// TestNameClassExcept tests validation with except constraints
+// TestNameClassExcept covers <anyName><except>…</except></anyName>.
 func TestNameClassExcept(t *testing.T) {
-	t.Run("anyName except specific names", func(t *testing.T) {
-		schema := `<?xml version="1.0" encoding="UTF-8"?>
-<grammar xmlns="http://relaxng.org/ns/structure/1.0">
-  <start><ref name="root"/></start>
-  <define name="root">
-    <element name="root">
-      <zeroOrMore>
-        <anyName><except><name>forbidden</name></except></anyName>
-      </zeroOrMore>
-    </element>
-  </define>
+	schema := `<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start><element name="root">
+    <zeroOrMore>
+      <element><anyName><except><name>forbidden</name></except></anyName><empty/></element>
+    </zeroOrMore>
+  </element></start>
 </grammar>`
-		xml := `<?xml version="1.0"?>
-<root>
-  <allowed/>
-  <alsogood/>
-</root>`
-		runNameClassExceptTest(t, schema, xml, true, "Should accept any element except 'forbidden'")
+
+	t.Run("accepts names outside the exception", func(t *testing.T) {
+		assertNameClass(t, schema, `<root><allowed/><alsogood/></root>`, true)
 	})
 
-	t.Run("anyName except should reject forbidden", func(t *testing.T) {
-		schema := `<?xml version="1.0" encoding="UTF-8"?>
-<grammar xmlns="http://relaxng.org/ns/structure/1.0">
-  <start><ref name="root"/></start>
-  <define name="root">
-    <element name="root">
-      <zeroOrMore>
-        <anyName><except><name>forbidden</name></except></anyName>
-      </zeroOrMore>
-    </element>
-  </define>
-</grammar>`
-		xml := `<?xml version="1.0"?>
-<root>
-  <allowed/>
-  <forbidden/>
-</root>`
-		runNameClassExceptTest(t, schema, xml, false, "Should reject element named 'forbidden'")
+	t.Run("rejects the excepted name", func(t *testing.T) {
+		assertNameClass(t, schema, `<root><allowed/><forbidden/></root>`, false)
 	})
 }
 
-// TestAttributeWildcards tests wildcard attribute matching
+// TestAttributeWildcards covers a fixed attribute plus a wildcard attribute set,
+// e.g. an id attribute alongside arbitrary data-* attributes.
 func TestAttributeWildcards(t *testing.T) {
-	t.Run("Extension attributes with anyName", func(t *testing.T) {
-		// This tests the case where an element can accept any attributes
-		// Common in HTML5 for data- attributes
-		schema := `<?xml version="1.0" encoding="UTF-8"?>
-<grammar xmlns="http://relaxng.org/ns/structure/1.0">
-  <start>
-    <ref name="element"/>
-  </start>
-  <define name="element">
-    <element name="div">
-      <attribute name="id"><text/></attribute>
-      <zeroOrMore>
-        <attribute>
-          <anyName/>
-        </attribute>
-      </zeroOrMore>
-    </element>
-  </define>
+	schema := `<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start><element name="div">
+    <attribute name="id"><text/></attribute>
+    <zeroOrMore><attribute><anyName/></attribute></zeroOrMore>
+  </element></start>
 </grammar>`
 
-		xml := `<?xml version="1.0"?>
-<div id="main" data-toggle="modal" data-target="#myModal"/>`
+	t.Run("accepts fixed plus wildcard attributes", func(t *testing.T) {
+		assertNameClass(t, schema, `<div id="main" data-toggle="modal" data-target="#myModal"/>`, true)
+	})
 
-		grammar, err := rng.ParseSchema(strings.NewReader(schema))
-		if err != nil {
-			t.Logf("Schema parsing may not support this yet: %v", err)
-			return
-		}
-
-		v := NewValidator(grammar, DefaultOptions())
-		errors, err := v.Validate(strings.NewReader(xml))
-
-		if err != nil {
-			t.Logf("validation error: %v", err)
-			return
-		}
-
-		if len(errors) > 0 {
-			t.Logf("Expected valid but got errors (will be fixed with name class support): %v", errors)
-		}
+	t.Run("rejects when the required attribute is missing", func(t *testing.T) {
+		assertNameClass(t, schema, `<div data-toggle="modal"/>`, false)
 	})
 }
