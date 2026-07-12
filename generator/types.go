@@ -43,6 +43,8 @@ func buildTypeFromElement(elem *rng.Element, typeName string, isRootType bool, n
 	addOneOrMoreFields(&typeInfo, elem, seenFields, refElem)
 	addGroupFields(&typeInfo, elem, seenFields, refElem)
 	addZeroOrMoreFields(&typeInfo, elem, seenFields, refElem)
+	addChoiceFields(&typeInfo, elem, seenFields, refElem)
+	addInterleaveFields(&typeInfo, elem, seenFields, refElem)
 	addMixedField(&typeInfo, elem, seenFields)
 	addDataValueField(&typeInfo, elem, seenFields)
 	addListValueField(&typeInfo, elem, seenFields)
@@ -316,6 +318,28 @@ func collectNestedElements(elem *rng.Element, collected map[string]*rng.Element)
 			}
 		}
 	}
+
+	// Collect from choice
+	if elem.Choice != nil {
+		for i := range elem.Choice.Elements {
+			subElem := &elem.Choice.Elements[i]
+			if subElem.Name != "" && collected[subElem.Name] == nil {
+				collected[subElem.Name] = subElem
+				collectNestedElements(subElem, collected)
+			}
+		}
+	}
+
+	// Collect from interleave
+	for i := range elem.Interleave {
+		for j := range elem.Interleave[i].Elements {
+			subElem := &elem.Interleave[i].Elements[j]
+			if subElem.Name != "" && collected[subElem.Name] == nil {
+				collected[subElem.Name] = subElem
+				collectNestedElements(subElem, collected)
+			}
+		}
+	}
 }
 
 func addElementNameField(typeInfo *TypeInfo, elem *rng.Element, seenFields map[string]bool) {
@@ -404,6 +428,122 @@ func addDirectElements(typeInfo *TypeInfo, elem *rng.Element, seenFields map[str
 				Name:   fieldName,
 				Type:   fieldType,
 				XMLTag: fmt.Sprintf("`xml:\"%s\"`", subElem.Name),
+			})
+			seenFields[fieldName] = true
+		}
+	}
+}
+
+// elementFieldType returns the Go type for a field generated from a sub-element.
+func elementFieldType(subElem *rng.Element) string {
+	switch {
+	case subElem.Text != nil:
+		return stringType
+	case hasNestedContent(subElem):
+		return toGoTypeName(subElem.Name)
+	default:
+		return stringType
+	}
+}
+
+// addChoiceFields generates fields for an element-level <choice>. Go struct tags
+// cannot express "exactly one of", so each alternative becomes an optional field
+// and unmarshalling populates whichever branch is present — preserving data that
+// was previously dropped entirely.
+func addChoiceFields(typeInfo *TypeInfo, elem *rng.Element, seenFields map[string]bool, refElem map[string]string) {
+	ch := elem.Choice
+	if ch == nil {
+		return
+	}
+
+	// A choice consisting only of <value>s is an enumerated text content.
+	if len(ch.Values) > 0 && len(ch.Elements) == 0 && len(ch.Refs) == 0 && len(ch.Attributes) == 0 {
+		if !seenFields["Value"] {
+			typeInfo.Fields = append(typeInfo.Fields, FieldInfo{
+				Name: "Value", Type: stringType, XMLTag: "`xml:\",chardata\"`",
+			})
+			seenFields["Value"] = true
+		}
+		return
+	}
+
+	for i := range ch.Elements {
+		subElem := &ch.Elements[i]
+		if subElem.Name == "" {
+			continue
+		}
+		fieldName := toGoFieldName(subElem.Name)
+		if seenFields[fieldName] {
+			continue
+		}
+		typeInfo.Fields = append(typeInfo.Fields, FieldInfo{
+			Name:     fieldName,
+			Type:     "*" + elementFieldType(subElem),
+			XMLTag:   fmt.Sprintf("`xml:\"%s,omitempty\"`", subElem.Name),
+			Optional: true,
+		})
+		seenFields[fieldName] = true
+	}
+	for _, ref := range ch.Refs {
+		fieldName := toGoFieldName(ref.Name)
+		if seenFields[fieldName] {
+			continue
+		}
+		target := refXMLName(refElem, ref.Name)
+		typeInfo.Fields = append(typeInfo.Fields, FieldInfo{
+			Name:     fieldName,
+			Type:     "*" + toGoTypeName(target),
+			XMLTag:   fmt.Sprintf("`xml:\"%s,omitempty\"`", sanitizeRefName(target)),
+			Optional: true,
+		})
+		seenFields[fieldName] = true
+	}
+	for i := range ch.Attributes {
+		addChoiceAttribute(typeInfo, &ch.Attributes[i], elem, seenFields)
+	}
+}
+
+func addChoiceAttribute(typeInfo *TypeInfo, attr *rng.Attribute, elem *rng.Element, seenFields map[string]bool) {
+	fieldName := toGoFieldName(attr.Name)
+	if attr.Name == "" || seenFields[fieldName] {
+		return
+	}
+	typeInfo.Fields = append(typeInfo.Fields, FieldInfo{
+		Name:   fieldName,
+		Type:   getAttributeFieldType(attr, elem),
+		XMLTag: fmt.Sprintf("`xml:\"%s,attr,omitempty\"`", attr.Name),
+	})
+	seenFields[fieldName] = true
+}
+
+// addInterleaveFields generates fields for an element-level <interleave>. Order
+// is irrelevant to encoding/xml, so each child becomes a plain field.
+func addInterleaveFields(typeInfo *TypeInfo, elem *rng.Element, seenFields map[string]bool, refElem map[string]string) {
+	for i := range elem.Interleave {
+		il := &elem.Interleave[i]
+		for j := range il.Elements {
+			subElem := &il.Elements[j]
+			if subElem.Name == "" || seenFields[toGoFieldName(subElem.Name)] {
+				continue
+			}
+			fieldName := toGoFieldName(subElem.Name)
+			typeInfo.Fields = append(typeInfo.Fields, FieldInfo{
+				Name:   fieldName,
+				Type:   elementFieldType(subElem),
+				XMLTag: fmt.Sprintf("`xml:\"%s\"`", subElem.Name),
+			})
+			seenFields[fieldName] = true
+		}
+		for _, ref := range il.Ref {
+			fieldName := toGoFieldName(ref.Name)
+			if seenFields[fieldName] {
+				continue
+			}
+			target := refXMLName(refElem, ref.Name)
+			typeInfo.Fields = append(typeInfo.Fields, FieldInfo{
+				Name:   fieldName,
+				Type:   toGoTypeName(target),
+				XMLTag: fmt.Sprintf("`xml:\"%s\"`", sanitizeRefName(target)),
 			})
 			seenFields[fieldName] = true
 		}
