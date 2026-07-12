@@ -22,6 +22,13 @@ import (
 
 var errUnsupported = errors.New("derivative builder: unsupported construct")
 
+// staleRaw reports whether RawContent is a stale remnant left after the parser
+// resolved the real content into structured fields (nested-grammar unpacking or
+// externalRef resolution). Such RawContent must not be parsed directly.
+func staleRaw(raw []byte) bool {
+	return bytes.Contains(raw, []byte("<grammar")) || bytes.Contains(raw, []byte("<externalRef"))
+}
+
 // includeUsesNs reports whether any <include> tag in raw carries an ns
 // attribute (which the parser applies to structured fields only).
 func includeUsesNs(raw string) bool {
@@ -177,9 +184,6 @@ func buildGrammar(g *rng.Grammar) (pat, map[string]pat, error) {
 	// are now consistent across parse paths); the define/start/element builders
 	// read them from there, deferring per-construct on parentRef.
 	raw := string(g.RawContent)
-	if strings.Contains(raw, "<externalRef") {
-		return nil, nil, errUnsupported
-	}
 	// <div ns="..."> and <include ns="..."> apply a namespace to element names
 	// that lives only in structured fields. Build names/refs from structured
 	// fields rather than the (unnamespaced) RawContent for these grammars.
@@ -249,7 +253,7 @@ func (b *builder) define(name string) (pat, error) {
 // remnant.
 func (b *builder) buildDefine(def *rng.Define, ctx bctx) (pat, error) {
 	if !b.preferStruct {
-		if raw := def.RawContent; len(bytes.TrimSpace(raw)) > 0 && !bytes.Contains(raw, []byte("<grammar")) {
+		if raw := def.RawContent; len(bytes.TrimSpace(raw)) > 0 && !staleRaw(raw) {
 			return b.parseSeq(raw, ctx)
 		}
 	}
@@ -269,7 +273,7 @@ func (b *builder) buildStart(start *rng.Start, ctx bctx) (pat, error) {
 		return pRef{start.ParentRef.Name}, nil
 	}
 	if !b.preferStruct {
-		if raw := start.RawContent; len(bytes.TrimSpace(raw)) > 0 && !bytes.Contains(raw, []byte("<grammar")) {
+		if raw := start.RawContent; len(bytes.TrimSpace(raw)) > 0 && !staleRaw(raw) {
 			return b.parseSeq(raw, ctx)
 		}
 	}
@@ -527,7 +531,7 @@ func (b *builder) elementFromStruct(el *rng.Element, ctx bctx) (pat, error) {
 		return b.elementFromRawContent(el.RawContent, childCtx)
 	}
 
-	if len(bytes.TrimSpace(el.RawContent)) == 0 || bytes.Contains(el.RawContent, []byte("<grammar")) {
+	if len(bytes.TrimSpace(el.RawContent)) == 0 || staleRaw(el.RawContent) {
 		// Empty raw content, or a stale nested-grammar remnant left in RawContent
 		// after the parser unpacked the real content into structured fields:
 		// build from the structured fields.
@@ -857,7 +861,9 @@ func (b *builder) parseSeq(raw []byte, ctx bctx) (pat, error) {
 // se) and consumes tokens through its matching end tag.
 func (b *builder) parseElementToken(dec *xml.Decoder, se xml.StartElement, ctx ctxT) (pat, error) {
 	local := se.Name.Local
-	childCtx := ctx
+	// Inline xmlns declarations on this element are in scope for QNames in its
+	// content's name attributes.
+	childCtx := withNsDecls(ctx, se.Attr)
 	if ns, ok := attr(se, "ns"); ok {
 		childCtx.ns = ns
 	}
