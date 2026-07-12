@@ -117,12 +117,11 @@ func buildGrammar(g *rng.Grammar) (pat, map[string]pat, error) {
 	// <include ns="..."> applies that namespace to the included element names in
 	// structured fields only, which this RawContent-based path would miss — so
 	// defer those.
-	// Nested grammars unpack into structured fields differently depending on the
-	// parse path (file resolver vs in-memory), so the builder reproduces them
-	// unreliably; defer them to the legacy engine.
+	// Nested grammars are unpacked by the parser into structured fields (which
+	// are now consistent across parse paths); the define/start/element builders
+	// read them from there, deferring per-construct on parentRef.
 	if raw := string(g.RawContent); strings.Contains(raw, "<externalRef") ||
 		strings.Contains(raw, "<div") ||
-		strings.Contains(raw, "<grammar") ||
 		strings.Contains(raw, "parentRef") ||
 		includeUsesNs(raw) {
 		return nil, nil, errUnsupported
@@ -179,20 +178,21 @@ func (b *builder) define(name string) (pat, error) {
 	return p, nil
 }
 
-// buildDefine builds a define's pattern from its RawContent, or — when that is
-// empty, as for combine-merged defines — from its structured fields.
+// buildDefine builds a define's pattern from its RawContent, or from structured
+// fields when RawContent is empty (combine-merged) or a stale nested-grammar
+// remnant.
 func (b *builder) buildDefine(def *rng.Define, ctx bctx) (pat, error) {
-	if len(bytes.TrimSpace(def.RawContent)) > 0 {
-		return b.parseSeq(def.RawContent, ctx)
+	if raw := def.RawContent; len(bytes.TrimSpace(raw)) > 0 && !bytes.Contains(raw, []byte("<grammar")) {
+		return b.parseSeq(raw, ctx)
 	}
 	return b.defineFromStruct(def, ctx)
 }
 
 // buildStart builds the start pattern from RawContent, or from structured fields
-// when RawContent is empty (a combine-merged start).
+// when RawContent is empty (combine-merged) or a stale nested-grammar remnant.
 func (b *builder) buildStart(start *rng.Start, ctx bctx) (pat, error) {
-	if len(bytes.TrimSpace(start.RawContent)) > 0 {
-		return b.parseSeq(start.RawContent, ctx)
+	if raw := start.RawContent; len(bytes.TrimSpace(raw)) > 0 && !bytes.Contains(raw, []byte("<grammar")) {
+		return b.parseSeq(raw, ctx)
 	}
 	return b.startFromStruct(start, ctx)
 }
@@ -424,10 +424,10 @@ func (b *builder) elementFromStruct(el *rng.Element, ctx bctx) (pat, error) {
 		return b.elementFromRawContent(el.RawContent, childCtx)
 	}
 
-	if len(bytes.TrimSpace(el.RawContent)) == 0 {
-		// Empty raw content: either a genuinely empty element or one whose
-		// content the parser moved into structured fields (nested-grammar
-		// unpacking). Build from the structured fields.
+	if len(bytes.TrimSpace(el.RawContent)) == 0 || bytes.Contains(el.RawContent, []byte("<grammar")) {
+		// Empty raw content, or a stale nested-grammar remnant left in RawContent
+		// after the parser unpacked the real content into structured fields:
+		// build from the structured fields.
 		content, err := b.structuredElementContent(el, childCtx)
 		if err != nil {
 			return nil, err

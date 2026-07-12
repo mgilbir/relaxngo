@@ -6201,15 +6201,17 @@ func (g *Grammar) applyNestedGrammarToStart(newDefines *[]Define) error {
 
 // unpackNestedGrammarsInStart unpacks nested grammars in Start and its patterns
 func (g *Grammar) unpackNestedGrammarsInStart(newDefines *[]Define) error {
-	// Check if Start has a direct element that contains a nested grammar
+	// Check if Start has a direct element that contains a nested grammar. When
+	// present, the nested grammar lives inside that element and is unpacked into
+	// it here; the RawContent branch below must not also run, or it would
+	// replace the whole start with the inner grammar's start and drop the
+	// wrapping element.
 	if g.Start.Element != nil {
 		if err := g.unpackNestedGrammarsInElement(g.Start.Element, newDefines); err != nil {
 			return err
 		}
-	}
-
-	// Check if Start's RawContent contains a nested grammar
-	if len(g.Start.RawContent) > 0 && bytes.Contains(g.Start.RawContent, []byte("<grammar")) {
+	} else if len(g.Start.RawContent) > 0 && bytes.Contains(g.Start.RawContent, []byte("<grammar")) {
+		// The nested grammar sits directly in the start pattern.
 		if err := g.applyNestedGrammarToStart(newDefines); err != nil {
 			return err
 		}
