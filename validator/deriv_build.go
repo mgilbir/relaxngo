@@ -160,6 +160,16 @@ func (b *builder) startFromStruct(start *rng.Start, ctx bctx) (pat, error) {
 		return b.choiceStruct(start.Choice, ctx)
 	case start.Element != nil:
 		return b.elementFromStruct(start.Element, ctx)
+	case len(start.Group) > 0:
+		var parts []pat
+		for i := range start.Group {
+			p, err := b.groupStruct(&start.Group[i], ctx)
+			if err != nil {
+				return nil, err
+			}
+			parts = append(parts, p)
+		}
+		return groupAll(parts), nil
 	case len(start.Interleave) > 0:
 		return b.interleaveList(start.Interleave, ctx)
 	case start.Empty != nil:
@@ -292,8 +302,8 @@ func (b *builder) groupStruct(g *rng.Group, ctx bctx) (pat, error) {
 	}
 	if len(g.Attributes) > 0 || len(g.Optional) > 0 || len(g.OneOrMore) > 0 ||
 		len(g.ZeroOrMore) > 0 || len(g.Choice) > 0 || len(g.Group) > 0 ||
-		len(g.Interleave) > 0 || g.Text != nil || g.List != nil ||
-		len(g.Value) > 0 || len(g.Data) > 0 || g.NotAllowed != nil || g.ExternalRef != nil {
+		len(g.Interleave) > 0 || g.List != nil ||
+		len(g.Value) > 0 || len(g.Data) > 0 || g.ExternalRef != nil {
 		return nil, errUnsupported
 	}
 	var parts []pat
@@ -306,6 +316,12 @@ func (b *builder) groupStruct(g *rng.Group, ctx bctx) (pat, error) {
 	}
 	for _, ref := range g.Ref {
 		parts = append(parts, pRef{ref.Name})
+	}
+	if g.Text != nil {
+		parts = append(parts, anyText)
+	}
+	if g.NotAllowed != nil {
+		parts = append(parts, notAllowed)
 	}
 	if len(parts) == 0 {
 		return nil, errUnsupported
@@ -337,11 +353,64 @@ func (b *builder) elementFromStruct(el *rng.Element, ctx bctx) (pat, error) {
 		}
 		return pElem{nc: nc, p: empty}, nil
 	}
-	content, err := b.parseSeq(el.RawContent, childCtx)
+	// When the element uses a name-class child (<name>/<anyName>/<nsName>/choice
+	// of names) rather than a name attribute, that child is the first thing in
+	// RawContent and is already captured in nc — skip it when parsing content.
+	content, err := b.parseElementContent(el.RawContent, childCtx, el.Name == "")
 	if err != nil {
 		return nil, err
 	}
 	return pElem{nc: nc, p: content}, nil
+}
+
+// parseElementContent parses an element's content from RawContent, optionally
+// skipping a leading name-class child that has already been translated.
+func (b *builder) parseElementContent(raw []byte, ctx bctx, skipNameClass bool) (pat, error) {
+	dec := xml.NewDecoder(bytes.NewReader(raw))
+	var parts []pat
+	skipped := !skipNameClass
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		se, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		if foreignElem(se) {
+			if err := skipElement(dec, se); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if !skipped {
+			skipped = true
+			if isNameClassElem(se.Name.Local) {
+				if err := skipElement(dec, se); err != nil {
+					return nil, err
+				}
+				continue
+			}
+		}
+		p, err := b.parseElementToken(dec, se, ctx)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, p)
+	}
+	return groupAll(parts), nil
+}
+
+// relaxNGNamespace is the RELAX NG structure namespace.
+const relaxNGNamespace = "http://relaxng.org/ns/structure/1.0"
+
+// foreignElem reports whether se is a foreign-namespace (annotation) element,
+// which RELAX NG ignores. Structural elements are either in the RELAX NG
+// namespace or (when RawContent is re-parsed without the ancestor xmlns in
+// scope) in no namespace; anything else is a foreign annotation.
+func foreignElem(se xml.StartElement) bool {
+	return se.Name.Space != "" && se.Name.Space != relaxNGNamespace
 }
 
 // elementHasStructuredContent reports whether an element carries content in
@@ -376,18 +445,62 @@ func ncFromElementStruct(el *rng.Element, ctx bctx) (nameClass, error) {
 		}
 		return ncName{ns: ns, local: local}, nil
 	case el.AnyName != nil:
-		if el.AnyName.Except != nil {
-			return nil, errUnsupported
-		}
-		return ncAny{}, nil
+		return anyNameClassFromStruct(el.AnyName, ctx)
 	case el.NsName != nil:
-		if el.NsName.Except != nil {
-			return nil, errUnsupported
-		}
-		return ncNs{ns: el.NsName.Ns}, nil
+		return nsNameClassFromStruct(el.NsName, ctx)
 	default:
 		return nil, errUnsupported
 	}
+}
+
+func anyNameClassFromStruct(an *rng.AnyName, ctx bctx) (nameClass, error) {
+	ex, err := exceptNameClassFromStruct(an.Except, ctx)
+	if err != nil {
+		return nil, err
+	}
+	return ncAny{except: ex}, nil
+}
+
+func nsNameClassFromStruct(nn *rng.NsName, ctx bctx) (nameClass, error) {
+	ex, err := exceptNameClassFromStruct(nn.Except, ctx)
+	if err != nil {
+		return nil, err
+	}
+	return ncNs{ns: nn.Ns, except: ex}, nil
+}
+
+// exceptNameClassFromStruct translates a name-class <except> (a set of names,
+// nsNames and anyNames) into a nameClass, or nil when there is no exception.
+func exceptNameClassFromStruct(ne *rng.NameExcept, ctx bctx) (nameClass, error) {
+	if ne == nil {
+		return nil, nil
+	}
+	var alts []nameClass
+	for _, n := range ne.Names {
+		local := strings.TrimSpace(n.Value)
+		if strings.Contains(local, ":") {
+			return nil, errUnsupported
+		}
+		alts = append(alts, ncName{ns: firstNonEmpty(n.Ns, ctx.ns), local: local})
+	}
+	if ne.NsName != nil {
+		sub, err := nsNameClassFromStruct(ne.NsName, ctx)
+		if err != nil {
+			return nil, err
+		}
+		alts = append(alts, sub)
+	}
+	if ne.AnyName != nil {
+		sub, err := anyNameClassFromStruct(ne.AnyName, ctx)
+		if err != nil {
+			return nil, err
+		}
+		alts = append(alts, sub)
+	}
+	if len(alts) == 0 {
+		return nil, nil
+	}
+	return foldNameChoice(alts), nil
 }
 
 // parseSeq parses a run of sibling patterns (the inner content of a container)
@@ -403,6 +516,12 @@ func (b *builder) parseSeq(raw []byte, ctx bctx) (pat, error) {
 		se, ok := tok.(xml.StartElement)
 		if !ok {
 			continue // whitespace/chardata/comments between patterns
+		}
+		if foreignElem(se) {
+			if err := skipElement(dec, se); err != nil {
+				return nil, err
+			}
+			continue
 		}
 		p, err := b.parseElementToken(dec, se, ctx)
 		if err != nil {
@@ -493,6 +612,12 @@ func (b *builder) parseChildren(dec *xml.Decoder, se xml.StartElement, ctx bctx)
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
+			if foreignElem(t) {
+				if err := skipElement(dec, t); err != nil {
+					return nil, err
+				}
+				continue
+			}
 			p, err := b.parseElementToken(dec, t, ctx)
 			if err != nil {
 				return nil, err
@@ -751,6 +876,12 @@ func (b *builder) parseData(dec *xml.Decoder, se xml.StartElement, ctx bctx) (pa
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
+			if foreignElem(t) {
+				if err := skipElement(dec, t); err != nil {
+					return nil, err
+				}
+				continue
+			}
 			switch t.Name.Local {
 			case "param":
 				pname, _ := attr(t, "name")
