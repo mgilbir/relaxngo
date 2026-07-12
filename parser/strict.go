@@ -178,11 +178,17 @@ type fieldSet struct {
 // extractKnownFields uses reflection to build a map of known XML elements and attributes.
 func extractKnownFields(t reflect.Type) map[string]fieldSet {
 	result := make(map[string]fieldSet)
-	extractKnownFieldsRecursive(t, "root", result)
+	extractKnownFieldsRecursive(t, "root", result, map[reflect.Type]bool{})
 	return result
 }
 
-func extractKnownFieldsRecursive(t reflect.Type, path string, result map[string]fieldSet) {
+// extractKnownFieldsRecursive walks a struct type's XML fields. visiting holds
+// the struct types currently on the recursion stack; a self-referential type
+// (e.g. type Node struct{ Children []Node }) would otherwise expand into an
+// unbounded chain of paths and never terminate. When a type recurses into
+// itself the walk stops — strict field checking applies down to the first
+// repetition of the type and is skipped below it, rather than hanging.
+func extractKnownFieldsRecursive(t reflect.Type, path string, result map[string]fieldSet, visiting map[reflect.Type]bool) {
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
@@ -190,6 +196,12 @@ func extractKnownFieldsRecursive(t reflect.Type, path string, result map[string]
 	if t.Kind() != reflect.Struct {
 		return
 	}
+
+	if visiting[t] {
+		return
+	}
+	visiting[t] = true
+	defer delete(visiting, t)
 
 	if _, exists := result[path]; !exists {
 		result[path] = fieldSet{
@@ -202,7 +214,7 @@ func extractKnownFieldsRecursive(t reflect.Type, path string, result map[string]
 	var rootElementName string
 	var actualPath string
 
-	processStructFields(t, path, &rootElementName, &actualPath, fields, result)
+	processStructFields(t, path, &rootElementName, &actualPath, fields, result, visiting)
 
 	if rootElementName != "" && path == "root" {
 		actualPath = rootElementName
@@ -212,7 +224,7 @@ func extractKnownFieldsRecursive(t reflect.Type, path string, result map[string]
 }
 
 func processStructFields(t reflect.Type, path string, rootElementName *string, actualPath *string,
-	fields fieldSet, result map[string]fieldSet) {
+	fields fieldSet, result map[string]fieldSet, visiting map[reflect.Type]bool) {
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
 		tag := field.Tag.Get("xml")
@@ -225,7 +237,7 @@ func processStructFields(t reflect.Type, path string, rootElementName *string, a
 			continue
 		}
 
-		processFieldTag(field, tag, path, actualPath, *rootElementName, fields, result)
+		processFieldTag(field, tag, path, actualPath, *rootElementName, fields, result, visiting)
 	}
 }
 
@@ -246,7 +258,7 @@ func handleXMLNameField(field reflect.StructField, tag string, rootElementName *
 }
 
 func processFieldTag(field reflect.StructField, tag, path string, actualPath *string, rootElementName string,
-	fields fieldSet, result map[string]fieldSet) {
+	fields fieldSet, result map[string]fieldSet, visiting map[reflect.Type]bool) {
 	parts := strings.Split(tag, ",")
 	name := parts[0]
 
@@ -263,7 +275,7 @@ func processFieldTag(field reflect.StructField, tag, path string, actualPath *st
 	if isAttr {
 		fields.attributes[name] = true
 	} else {
-		processElementField(field, name, path, *actualPath, rootElementName, fields, result)
+		processElementField(field, name, path, *actualPath, rootElementName, fields, result, visiting)
 	}
 }
 
@@ -282,7 +294,7 @@ func parseFieldTagParts(parts []string) (bool, bool) {
 }
 
 // processElementField handles processing of element fields during known field extraction
-func processElementField(field reflect.StructField, name, path, actualPath, rootElementName string, fields fieldSet, result map[string]fieldSet) {
+func processElementField(field reflect.StructField, name, path, actualPath, rootElementName string, fields fieldSet, result map[string]fieldSet, visiting map[reflect.Type]bool) {
 	fields.elements[name] = true
 
 	fieldType := field.Type
@@ -303,7 +315,7 @@ func processElementField(field reflect.StructField, name, path, actualPath, root
 		default:
 			childPath = path + "." + name
 		}
-		extractKnownFieldsRecursive(fieldType, childPath, result)
+		extractKnownFieldsRecursive(fieldType, childPath, result, visiting)
 	}
 }
 
