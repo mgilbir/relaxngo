@@ -2406,9 +2406,25 @@ func validateElementDirectRefs(elem *Element, validDefineNames map[string]bool) 
 	return nil
 }
 
-// validateElementNestedRefs recursively validates refs in nested element containers
+// validateRefList reports the first ref in refs whose target is not a defined name.
+func validateRefList(refs []Ref, validDefineNames map[string]bool) error {
+	for _, ref := range refs {
+		if !validDefineNames[ref.Name] {
+			return fmt.Errorf("undefined reference '%s'", ref.Name)
+		}
+	}
+	return nil
+}
+
+// validateElementNestedRefs recursively validates refs in nested element containers.
+// It checks both each container's own <ref>/<parentRef> children and the refs
+// inside any nested elements — an undefined ref directly inside, say, a
+// <oneOrMore> or <choice> was previously accepted silently.
 func validateElementNestedRefs(elem *Element, validDefineNames map[string]bool) error {
 	if elem.Choice != nil {
+		if err := validateRefList(elem.Choice.Refs, validDefineNames); err != nil {
+			return err
+		}
 		for _, childElem := range elem.Choice.Elements {
 			if err := validateElementRefs(&childElem, validDefineNames); err != nil {
 				return err
@@ -2417,6 +2433,9 @@ func validateElementNestedRefs(elem *Element, validDefineNames map[string]bool) 
 	}
 
 	for _, group := range elem.Group {
+		if err := validateRefList(group.Ref, validDefineNames); err != nil {
+			return err
+		}
 		for _, childElem := range group.Elements {
 			if err := validateElementRefs(&childElem, validDefineNames); err != nil {
 				return err
@@ -2425,6 +2444,9 @@ func validateElementNestedRefs(elem *Element, validDefineNames map[string]bool) 
 	}
 
 	for _, interleave := range elem.Interleave {
+		if err := validateRefList(interleave.Ref, validDefineNames); err != nil {
+			return err
+		}
 		for _, childElem := range interleave.Elements {
 			if err := validateElementRefs(&childElem, validDefineNames); err != nil {
 				return err
@@ -2433,6 +2455,12 @@ func validateElementNestedRefs(elem *Element, validDefineNames map[string]bool) 
 	}
 
 	for _, optional := range elem.Optional {
+		if err := validateRefList(optional.Ref, validDefineNames); err != nil {
+			return err
+		}
+		if err := validateRefList(optional.ParentRef, validDefineNames); err != nil {
+			return err
+		}
 		for _, childElem := range optional.Elements {
 			if err := validateElementRefs(&childElem, validDefineNames); err != nil {
 				return err
@@ -2441,6 +2469,9 @@ func validateElementNestedRefs(elem *Element, validDefineNames map[string]bool) 
 	}
 
 	for _, oneOrMore := range elem.OneOrMore {
+		if err := validateRefList(oneOrMore.Ref, validDefineNames); err != nil {
+			return err
+		}
 		for _, childElem := range oneOrMore.Element {
 			if err := validateElementRefs(&childElem, validDefineNames); err != nil {
 				return err
@@ -2449,6 +2480,9 @@ func validateElementNestedRefs(elem *Element, validDefineNames map[string]bool) 
 	}
 
 	for _, zeroOrMore := range elem.ZeroOrMore {
+		if err := validateRefList(zeroOrMore.Ref, validDefineNames); err != nil {
+			return err
+		}
 		for _, childElem := range zeroOrMore.Element {
 			if err := validateElementRefs(&childElem, validDefineNames); err != nil {
 				return err
@@ -2457,6 +2491,9 @@ func validateElementNestedRefs(elem *Element, validDefineNames map[string]bool) 
 	}
 
 	if elem.Mixed != nil {
+		if err := validateRefList(elem.Mixed.Ref, validDefineNames); err != nil {
+			return err
+		}
 		for _, childElem := range elem.Mixed.Elements {
 			if err := validateElementRefs(&childElem, validDefineNames); err != nil {
 				return err
