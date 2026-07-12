@@ -19,13 +19,15 @@ type TypeWithMethods struct {
 
 // Template data structures
 type unmarshalMethodData struct {
-	TypeName         string
-	ValidatorVar     string
-	OnceVar          string
-	IsRootType       bool
-	SchemaContentVar string
-	SchemaGrammarVar string
-	SchemaOnceVar    string
+	TypeName            string
+	ValidatorVar        string
+	OnceVar             string
+	IsRootType          bool
+	SchemaContentVar    string
+	SchemaGrammarVar    string
+	SchemaGrammarErrVar string
+	SchemaOnceVar       string
+	FormatErrorsFunc    string
 }
 
 var unmarshalMethodTemplate = template.Must(template.New("unmarshal").Parse(`
@@ -33,12 +35,11 @@ var unmarshalMethodTemplate = template.Must(template.New("unmarshal").Parse(`
 func (x *{{.TypeName}}) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	// Initialize schema and validator on first use
 	{{.SchemaOnceVar}}.Do(func() {
-		var err error
-		{{.SchemaGrammarVar}}, err = rng.ParseSchema(strings.NewReader({{.SchemaContentVar}}))
-		if err != nil {
-			panic("failed to parse embedded schema: " + err.Error())
-		}
+		{{.SchemaGrammarVar}}, {{.SchemaGrammarErrVar}} = rng.ParseSchema(strings.NewReader({{.SchemaContentVar}}))
 	})
+	if {{.SchemaGrammarErrVar}} != nil {
+		return fmt.Errorf("failed to parse embedded schema: %w", {{.SchemaGrammarErrVar}})
+	}
 
 	{{.OnceVar}}.Do(func() {
 		if {{.SchemaGrammarVar}} != nil {
@@ -86,7 +87,7 @@ func (x *{{.TypeName}}) UnmarshalXML(d *xml.Decoder, start xml.StartElement) err
 		if errs, err := {{.ValidatorVar}}.Validate(bytes.NewReader(rawBuf.Bytes())); err != nil {
 			return fmt.Errorf("validation error: %w (validating: %s)", err, rawBuf.String())
 		} else if len(errs) > 0 {
-			return fmt.Errorf("validation failed on XML: %s\nErrors: %w", rawBuf.String(), formatValidationErrors(errs))
+			return fmt.Errorf("validation failed on XML: %s\nErrors: %w", rawBuf.String(), {{.FormatErrorsFunc}}(errs))
 		}
 	}
 
@@ -112,12 +113,11 @@ var validateMethodTemplate = template.Must(template.New("validate").Parse(`
 func (x *{{.TypeName}}) Validate() error {
 	// Initialize schema and validator on first use
 	{{.SchemaOnceVar}}.Do(func() {
-		var err error
-		{{.SchemaGrammarVar}}, err = rng.ParseSchema(strings.NewReader({{.SchemaContentVar}}))
-		if err != nil {
-			panic("failed to parse embedded schema: " + err.Error())
-		}
+		{{.SchemaGrammarVar}}, {{.SchemaGrammarErrVar}} = rng.ParseSchema(strings.NewReader({{.SchemaContentVar}}))
 	})
+	if {{.SchemaGrammarErrVar}} != nil {
+		return fmt.Errorf("failed to parse embedded schema: %w", {{.SchemaGrammarErrVar}})
+	}
 
 	{{.OnceVar}}.Do(func() {
 		if {{.SchemaGrammarVar}} != nil {
@@ -140,7 +140,7 @@ func (x *{{.TypeName}}) Validate() error {
 		if errs, err := {{.ValidatorVar}}.Validate(bytes.NewReader(buf.Bytes())); err != nil {
 			return fmt.Errorf("validation error: %w (validating: %s)", err, buf.String())
 		} else if len(errs) > 0 {
-			return fmt.Errorf("validation failed on XML: %s\nErrors: %w", buf.String(), formatValidationErrors(errs))
+			return fmt.Errorf("validation failed on XML: %s\nErrors: %w", buf.String(), {{.FormatErrorsFunc}}(errs))
 		}
 	}
 
@@ -153,8 +153,10 @@ var unmarshalHeaderTemplate = template.Must(template.New("header").Parse(`
 const {{.SchemaContentVar}} = ` + "`" + `{{.Schema}}` + "`" + `
 
 // {{.SchemaGrammarVar}} is the schema grammar used for validation.
-// It is automatically initialized from the embedded schema.
+// It is automatically initialized from the embedded schema; if that ever fails
+// {{.SchemaGrammarErrVar}} records the error so callers can surface it.
 var {{.SchemaGrammarVar}} *rng.Grammar
+var {{.SchemaGrammarErrVar}} error
 var {{.SchemaOnceVar}} sync.Once
 
 {{range .Validators}}var (
@@ -162,8 +164,8 @@ var {{.SchemaOnceVar}} sync.Once
 	{{.OnceVar}} sync.Once
 )
 {{end}}
-// formatValidationErrors formats validation errors into a comprehensive error message
-func formatValidationErrors(errs []validator.ValidationError) error {
+// {{.FormatErrorsFunc}} formats validation errors into a comprehensive error message
+func {{.FormatErrorsFunc}}(errs []validator.ValidationError) error {
 	if len(errs) == 0 {
 		return nil
 	}
@@ -173,7 +175,7 @@ func formatValidationErrors(errs []validator.ValidationError) error {
 
 	for i, err := range errs {
 		msg.WriteString(fmt.Sprintf("  [%d] %s\n", i+1, err.Error()))
-		if err.Expected != nil && len(err.Expected) > 0 {
+		if len(err.Expected) > 0 {
 			msg.WriteString(fmt.Sprintf("      Expected: %v\n", err.Expected))
 		}
 		if err.Found != "" {
@@ -186,11 +188,13 @@ func formatValidationErrors(errs []validator.ValidationError) error {
 `))
 
 type unmarshalHeaderData struct {
-	Schema           string
-	SchemaContentVar string
-	SchemaGrammarVar string
-	SchemaOnceVar    string
-	Validators       []validatorDecl
+	Schema              string
+	SchemaContentVar    string
+	SchemaGrammarVar    string
+	SchemaGrammarErrVar string
+	SchemaOnceVar       string
+	FormatErrorsFunc    string
+	Validators          []validatorDecl
 }
 
 type validatorDecl struct {
@@ -273,15 +277,19 @@ func GenerateCodeWithUnmarshal(types []TypeInfo, packageName string, _ string, g
 		// Create unique schema variable names to avoid collisions
 		schemaContentVar := "schema" + schemaID + "Content"
 		schemaGrammarVar := "schema" + schemaID + "Grammar"
+		schemaGrammarErrVar := "schema" + schemaID + "GrammarErr"
 		schemaOnceVar := "schema" + schemaID + "Once"
+		formatErrorsFunc := "formatValidationErrors" + schemaID
 
 		// Write header with schema, grammar declarations, and validation helper
 		if err := unmarshalHeaderTemplate.Execute(&output, unmarshalHeaderData{
-			Schema:           schemaContent,
-			SchemaContentVar: schemaContentVar,
-			SchemaGrammarVar: schemaGrammarVar,
-			SchemaOnceVar:    schemaOnceVar,
-			Validators:       validators,
+			Schema:              schemaContent,
+			SchemaContentVar:    schemaContentVar,
+			SchemaGrammarVar:    schemaGrammarVar,
+			SchemaGrammarErrVar: schemaGrammarErrVar,
+			SchemaOnceVar:       schemaOnceVar,
+			FormatErrorsFunc:    formatErrorsFunc,
+			Validators:          validators,
 		}); err != nil {
 			return "", fmt.Errorf("failed to execute unmarshal header template: %w", err)
 		}
@@ -332,13 +340,15 @@ func generateStructDefinition(typeInfo TypeInfo) string {
 // generateUnmarshalXMLMethod generates an UnmarshalXML method with two-pass validation
 func generateUnmarshalXMLMethod(typeInfo *TypeInfo, _ *rng.Grammar, schemaID string) string {
 	data := unmarshalMethodData{
-		TypeName:         typeInfo.Name,
-		ValidatorVar:     typeInfo.Name + "Validator",
-		OnceVar:          typeInfo.Name + "Once",
-		IsRootType:       typeInfo.IsRootType,
-		SchemaContentVar: "schema" + schemaID + "Content",
-		SchemaGrammarVar: "schema" + schemaID + "Grammar",
-		SchemaOnceVar:    "schema" + schemaID + "Once",
+		TypeName:            typeInfo.Name,
+		ValidatorVar:        typeInfo.Name + "Validator",
+		OnceVar:             typeInfo.Name + "Once",
+		IsRootType:          typeInfo.IsRootType,
+		SchemaContentVar:    "schema" + schemaID + "Content",
+		SchemaGrammarVar:    "schema" + schemaID + "Grammar",
+		SchemaGrammarErrVar: "schema" + schemaID + "GrammarErr",
+		SchemaOnceVar:       "schema" + schemaID + "Once",
+		FormatErrorsFunc:    "formatValidationErrors" + schemaID,
 	}
 
 	var buf bytes.Buffer
@@ -351,13 +361,15 @@ func generateUnmarshalXMLMethod(typeInfo *TypeInfo, _ *rng.Grammar, schemaID str
 // generateValidateMethod generates a Validate method that checks object state against the grammar
 func generateValidateMethod(typeInfo *TypeInfo, schemaID string) string {
 	data := unmarshalMethodData{
-		TypeName:         typeInfo.Name,
-		ValidatorVar:     typeInfo.Name + "Validator",
-		OnceVar:          typeInfo.Name + "Once",
-		IsRootType:       typeInfo.IsRootType,
-		SchemaContentVar: "schema" + schemaID + "Content",
-		SchemaGrammarVar: "schema" + schemaID + "Grammar",
-		SchemaOnceVar:    "schema" + schemaID + "Once",
+		TypeName:            typeInfo.Name,
+		ValidatorVar:        typeInfo.Name + "Validator",
+		OnceVar:             typeInfo.Name + "Once",
+		IsRootType:          typeInfo.IsRootType,
+		SchemaContentVar:    "schema" + schemaID + "Content",
+		SchemaGrammarVar:    "schema" + schemaID + "Grammar",
+		SchemaGrammarErrVar: "schema" + schemaID + "GrammarErr",
+		SchemaOnceVar:       "schema" + schemaID + "Once",
+		FormatErrorsFunc:    "formatValidationErrors" + schemaID,
 	}
 
 	var buf bytes.Buffer
