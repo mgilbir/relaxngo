@@ -86,3 +86,6 @@ Temporary Items
 
 *.prof
 .claude
+
+# Accidental generator scratch output
+dummy/
