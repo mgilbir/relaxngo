@@ -19,19 +19,31 @@ go get github.com/mgilbir/relaxngo
 ```go
 import (
     "log"
+    "os"
+
     "github.com/mgilbir/relaxngo/rng"
     "github.com/mgilbir/relaxngo/validator"
 )
 
-// Load schema
-schema, err := rng.ParseFile("schema.rng")
+// Load schema (second argument is the base directory for resolving includes)
+schema, err := rng.ParseSchemaFile("schema.rng", ".")
 if err != nil {
     log.Fatal(err)
 }
 
+// Open the document to validate
+doc, err := os.Open("document.xml")
+if err != nil {
+    log.Fatal(err)
+}
+defer doc.Close()
+
 // Validate document
 v := validator.NewValidator(schema, validator.DefaultOptions())
-errors, err := v.Validate(file)
+errors, err := v.Validate(doc)
+if err != nil {
+    log.Fatal(err) // XML was not well-formed
+}
 
 if len(errors) > 0 {
     for _, e := range errors {
@@ -48,25 +60,23 @@ if len(errors) > 0 {
 go run cmd/generate/main.go -schema schema.rng -package myapp > myapp/types.go
 ```
 
-Example output:
+The generated file contains a struct for each element, plus the embedded
+schema and a `Validate()`/`UnmarshalXML()` method per root type that check the
+value against the schema. The struct portion looks like:
 
 ```go
 package myapp
 
-import "encoding/xml"
-
 type Book struct {
     XMLName xml.Name `xml:"book"`
+    Id      string   `xml:"id,attr"`
     Title   string   `xml:"title"`
     Author  string   `xml:"author"`
-    Year    int64    `xml:"year"`
-}
-
-type Library struct {
-    XMLName xml.Name `xml:"library"`
-    Books   []Book   `xml:"book"`
 }
 ```
+
+Repeated elements become slices and optional elements/attributes become
+pointers with `,omitempty`.
 
 ## Features
 
@@ -104,10 +114,10 @@ type Library struct {
 
 ### Security & Performance
 
-- **Path Traversal Protection**: Validates schema include paths
-- **DoS Prevention**: 50MB default size limit on documents
+- **Path Traversal Protection**: Schema includes/externalRefs are confined to the base directory
+- **Size Limits**: 50MB cap on strict XML parsing (`StrictParseXML`) and on individual schema resources
 - **Cycle Detection**: Prevents infinite loops in schema includes
-- **High Performance**: 240k-300k documents/sec validation speed
+- **High Performance**: hundreds of thousands of documents/sec for simple schemas (see [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md))
 - **Zero Dependencies**: Uses only Go standard library
 
 ## Usage
@@ -123,7 +133,7 @@ import (
 )
 
 // Load schema
-schema, err := rng.ParseFile("schema.rng")
+schema, err := rng.ParseSchemaFile("schema.rng", ".")
 if err != nil {
     log.Fatal(err)
 }
@@ -150,9 +160,18 @@ for _, e := range errors {
 
 ```go
 import (
-    "github.com/mgilbir/relaxngo/parser"
+    "bytes"
+    "encoding/xml"
+    "errors"
     "log"
+
+    "github.com/mgilbir/relaxngo/parser"
 )
+
+type Person struct {
+    XMLName xml.Name `xml:"person"`
+    Name    string   `xml:"name"`
+}
 
 data := []byte(`<person>
     <name>John</name>
@@ -160,11 +179,13 @@ data := []byte(`<person>
     <email>john@example.com</email>
 </person>`)
 
-p := parser.NewStrictParser()
-_, unknownFields, err := p.ParseXML(data)
+var p Person
+err := parser.StrictParseXML(bytes.NewReader(data), &p)
 
-if len(unknownFields) > 0 {
-    log.Printf("Unknown fields: %v", unknownFields)
+var unknown *parser.UnknownFieldError
+if errors.As(err, &unknown) {
+    log.Printf("Unknown elements: %v, unknown attributes: %v",
+        unknown.UnknownElements, unknown.UnknownAttributes)
 }
 ```
 
@@ -175,16 +196,16 @@ if len(unknownFields) > 0 {
 | Package | Purpose | Main Type |
 |---------|---------|-----------|
 | `rng` | Parse RELAX NG schemas | `Grammar` |
-| `generator` | Generate Go types | `Generator` |
+| `generator` | Generate Go types | `GenerateTypes` / `GenerateCode` |
 | `validator` | Validate XML against schema | `Validator` |
-| `parser` | Parse XML documents | `StrictParser` |
+| `parser` | Parse XML documents (detect unknown fields) | `StrictParseXML` |
 
 ### Workflow
 
 ```
 Schema File (.rng)
     ↓
-[rng.ParseFile]
+[rng.ParseSchemaFile]
     ↓
 Grammar Structure
     ↓
@@ -204,17 +225,16 @@ The library passes the complete official RELAX NG test suite:
 
 ## Performance
 
+See [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md) for full methodology and numbers.
+Representative figures on the reference machine:
+
 | Operation | Performance |
 |-----------|------------|
 | Schema Parsing | 1-50 µs/op |
-| XML Validation | 240k-300k docs/sec |
+| XML Validation | ~2-20 µs/op (simple → complex schemas) |
 | Code Generation | <1 sec typical |
 
-**Tested Scenarios:**
-- ✅ Documents up to 100MB
-- ✅ Deep nesting (100+ levels)
-- ✅ Many elements (10,000+)
-- ✅ Concurrent validation
+Validation is safe to call concurrently on a shared `Validator`.
 
 ## Testing
 
@@ -229,8 +249,7 @@ make test-generator   # Run generator-specific tests
 
 ### Test Results
 
-- **Unit Tests**: 136/136 passing ✅
-- **Fuzz Tests**: 4.9M+ executions, 0 crashes ✅
+- **Unit Tests**: passing (`go test ./...`)
 - **Official Suite**: 742/742 tests (100%) ✅
 
 ## Contributing
