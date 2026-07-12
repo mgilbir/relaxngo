@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -2484,37 +2483,12 @@ func (ctx *validationContext) validateDataType(typeName, value string) bool {
 	}
 
 	switch typeName {
-	case dataTypeString:
-		return true // String can be anything, even empty
-	case dataTypeToken:
-		// Token can be empty (after whitespace normalization, empty content becomes empty token)
+	case dataTypeString, dataTypeToken, dataTypeNormalizedString:
+		// These accept any content; token/normalizedString are already
+		// whitespace-processed upstream.
 		return true
-	case dataTypeNormalizedString:
-		// NormalizedString can be empty
-		return true
-	case "boolean":
-		return trimmedValue == "true" || trimmedValue == "false" || trimmedValue == "1" || trimmedValue == "0"
-	case "integer", "int", "long", "short", "byte":
-		// Use strconv for strict parsing (no partial matches like Sscanf)
-		_, err := strconv.ParseInt(trimmedValue, 10, 64)
-		return err == nil
-	case "nonNegativeInteger", "positiveInteger":
-		val, err := strconv.ParseInt(trimmedValue, 10, 64)
-		if err != nil {
-			return false
-		}
-		if typeName == "positiveInteger" {
-			return val > 0
-		}
-		return val >= 0
-	case "decimal", "double", "float":
-		// Use strconv for strict parsing
-		_, err := strconv.ParseFloat(value, 64)
-		return err == nil
-	case "anyURI":
-		return len(value) > 0
 	default:
-		return true
+		return validateXSDType(typeName, trimmedValue)
 	}
 }
 
@@ -2606,7 +2580,11 @@ func (ctx *validationContext) matchPattern(value, pattern string) bool {
 	// Go's regexp package uses RE2 (linear-time automata), so it is not
 	// vulnerable to catastrophic backtracking; the length limit above is extra
 	// safety against pathological compile times.
-	regex := cachedRegex(pattern)
+	//
+	// XSD pattern facets are anchored to the entire lexical value (an implicit
+	// ^(?:...)$), unlike Go's default substring semantics. Anchor here so that
+	// e.g. pattern="[0-9]{3}" rejects "abc123def".
+	regex := cachedRegex("^(?:" + pattern + ")$")
 	if regex == nil {
 		return false
 	}
