@@ -26,7 +26,7 @@ type FieldInfo struct {
 }
 
 // buildTypeFromElement builds a TypeInfo from an element.
-func buildTypeFromElement(elem *rng.Element, typeName string, isRootType bool, nestedElements map[string]*rng.Element, refElem map[string]string) TypeInfo {
+func buildTypeFromElement(elem *rng.Element, typeName string, isRootType bool, nestedElements map[string][]*rng.Element, refElem map[string]string) TypeInfo {
 	typeInfo := TypeInfo{
 		Name:       typeName,
 		Fields:     make([]FieldInfo, 0),
@@ -56,7 +56,7 @@ func buildTypeFromElement(elem *rng.Element, typeName string, isRootType bool, n
 }
 
 // buildInterleaveType builds a TypeInfo for defines with interleave patterns.
-func buildInterleaveType(def *rng.Define, defineTypeName string, isRootType bool, nestedElements map[string]*rng.Element) TypeInfo {
+func buildInterleaveType(def *rng.Define, defineTypeName string, isRootType bool, nestedElements map[string][]*rng.Element) TypeInfo {
 	typeInfo := TypeInfo{
 		Name:       defineTypeName,
 		Fields:     make([]FieldInfo, 0),
@@ -98,8 +98,8 @@ func buildInterleaveType(def *rng.Define, defineTypeName string, isRootType bool
 		}
 
 		// Collect the element itself as a nested element (if it doesn't have Text)
-		if e.Text == nil && e.Name != "" && nestedElements[e.Name] == nil {
-			nestedElements[e.Name] = e
+		if e.Text == nil && e.Name != "" {
+			collectVariant(e, nestedElements)
 		}
 
 		// Collect nested elements within this element
@@ -110,7 +110,7 @@ func buildInterleaveType(def *rng.Define, defineTypeName string, isRootType bool
 }
 
 // buildMultiElementType builds a TypeInfo for defines with multiple direct element children.
-func buildMultiElementType(def *rng.Define, defineTypeName string, isRootType bool, nestedElements map[string]*rng.Element) TypeInfo {
+func buildMultiElementType(def *rng.Define, defineTypeName string, isRootType bool, nestedElements map[string][]*rng.Element) TypeInfo {
 	typeInfo := TypeInfo{
 		Name:       defineTypeName,
 		Fields:     make([]FieldInfo, 0),
@@ -154,7 +154,7 @@ func buildMultiElementType(def *rng.Define, defineTypeName string, isRootType bo
 }
 
 // processDefines processes all defines from a grammar and builds types.
-func processDefines(grammar *rng.Grammar, rootDefineName string, types *[]TypeInfo, seenTypeNames map[string]bool, nestedElements map[string]*rng.Element, refElem map[string]string) {
+func processDefines(grammar *rng.Grammar, rootDefineName string, types *[]TypeInfo, seenTypeNames map[string]bool, nestedElements map[string][]*rng.Element, refElem map[string]string) {
 	for idx := range grammar.Defines {
 		def := &grammar.Defines[idx]
 		defineTypeName := toGoTypeName(def.Name)
@@ -203,9 +203,10 @@ func processDefines(grammar *rng.Grammar, rootDefineName string, types *[]TypeIn
 	}
 }
 
-// processNestedElements generates types for all collected nested elements.
-func processNestedElements(nestedElements map[string]*rng.Element, types *[]TypeInfo, seenTypeNames map[string]bool, refElem map[string]string) {
-	for elemName, elem := range nestedElements {
+// processNestedElements generates types for all collected nested elements,
+// merging same-named variants into one type.
+func processNestedElements(nestedElements map[string][]*rng.Element, types *[]TypeInfo, seenTypeNames map[string]bool, refElem map[string]string) {
+	for elemName, variants := range nestedElements {
 		typeName := toGoTypeName(elemName)
 
 		// Skip if already generated
@@ -213,10 +214,63 @@ func processNestedElements(nestedElements map[string]*rng.Element, types *[]Type
 			continue
 		}
 
-		typeInfo := buildTypeFromElement(elem, typeName, false, nestedElements, refElem)
+		typeInfo := buildMergedType(variants, typeName, false, nestedElements, refElem)
 		*types = append(*types, typeInfo)
 		seenTypeNames[typeName] = true
 	}
+}
+
+// buildMergedType builds one TypeInfo for a set of same-named element variants.
+// With a single variant it is just buildTypeFromElement; with several (two
+// <element name="item"> with different content) it unions their fields and makes
+// them optional, so a document matching either variant unmarshals without loss
+// instead of the second variant being dropped.
+func buildMergedType(variants []*rng.Element, typeName string, isRootType bool, nestedElements map[string][]*rng.Element, refElem map[string]string) TypeInfo {
+	base := buildTypeFromElement(variants[0], typeName, isRootType, nestedElements, refElem)
+	if len(variants) == 1 {
+		return base
+	}
+
+	seen := make(map[string]bool, len(base.Fields))
+	for _, f := range base.Fields {
+		seen[f.Name] = true
+	}
+	for _, v := range variants[1:] {
+		vt := buildTypeFromElement(v, typeName, isRootType, nestedElements, refElem)
+		for _, f := range vt.Fields {
+			if f.Name == "XMLName" || seen[f.Name] {
+				continue
+			}
+			base.Fields = append(base.Fields, f)
+			seen[f.Name] = true
+		}
+	}
+
+	// Fields come from mutually-exclusive variants, so none is always present.
+	for i := range base.Fields {
+		base.Fields[i] = makeFieldOptional(base.Fields[i])
+	}
+	return base
+}
+
+// makeFieldOptional rewrites a field so encoding/xml treats it as optional
+// (adds omitempty; element fields also become pointers). XMLName is unchanged.
+func makeFieldOptional(f FieldInfo) FieldInfo {
+	if f.Name == "XMLName" || f.Optional {
+		return f
+	}
+	if !strings.Contains(f.XMLTag, "omitempty") {
+		f.XMLTag = strings.Replace(f.XMLTag, `"`+"`", `,omitempty"`+"`", 1)
+	}
+	// Element fields (no ",attr"/",chardata"/",innerxml") become pointers so an
+	// absent element is distinguishable and omitted.
+	if !strings.Contains(f.XMLTag, ",attr") && !strings.Contains(f.XMLTag, ",chardata") &&
+		!strings.Contains(f.XMLTag, ",innerxml") && !strings.HasPrefix(f.Type, "*") &&
+		!strings.HasPrefix(f.Type, "[]") {
+		f.Type = "*" + f.Type
+	}
+	f.Optional = true
+	return f
 }
 
 // GenerateTypes creates TypeInfo structures from a RELAX NG grammar.
@@ -224,7 +278,7 @@ func processNestedElements(nestedElements map[string]*rng.Element, types *[]Type
 func GenerateTypes(grammar *rng.Grammar) ([]TypeInfo, error) {
 	types := make([]TypeInfo, 0)
 	seenTypeNames := make(map[string]bool)
-	nestedElements := make(map[string]*rng.Element) // Collect nested elements
+	nestedElements := make(map[string][]*rng.Element) // Collect nested elements
 
 	// A ref generates a field whose Go type and XML tag come from the element
 	// the referenced define wraps — not the define name, which may differ (e.g.
@@ -265,80 +319,66 @@ func GenerateTypes(grammar *rng.Grammar) ([]TypeInfo, error) {
 	return types, nil
 }
 
-// collectNestedElements recursively collects all nested elements in the schema
-func collectNestedElements(elem *rng.Element, collected map[string]*rng.Element) {
-	// Collect from direct nested elements. addDirectElements emits a field
-	// typed after the child element when it has nested content, so that child
-	// type must be generated too — otherwise the output references an undefined
-	// type and does not compile.
+// collectNestedElements recursively collects all nested elements in the schema.
+// Elements are keyed by name and every distinct variant is kept, so that two
+// same-named elements with different content can be merged into one type instead
+// of the second being silently dropped.
+func collectNestedElements(elem *rng.Element, collected map[string][]*rng.Element) {
+	// addDirectElements (and the choice/interleave passes) emit a field typed
+	// after a child element with nested content, so those child types must be
+	// generated too — otherwise the output references an undefined type.
 	for i := range elem.Elements {
-		subElem := &elem.Elements[i]
-		if subElem.Name != "" && collected[subElem.Name] == nil {
-			collected[subElem.Name] = subElem
-			collectNestedElements(subElem, collected)
+		collectVariant(&elem.Elements[i], collected)
+	}
+	for gi := range elem.Group {
+		for i := range elem.Group[gi].Elements {
+			collectVariant(&elem.Group[gi].Elements[i], collected)
 		}
 	}
-
-	// Collect from groups
-	for _, group := range elem.Group {
-		for _, subElem := range group.Elements {
-			if subElem.Name != "" && collected[subElem.Name] == nil {
-				collected[subElem.Name] = &subElem
-				collectNestedElements(&subElem, collected)
-			}
+	for oi := range elem.OneOrMore {
+		for i := range elem.OneOrMore[oi].Element {
+			collectVariant(&elem.OneOrMore[oi].Element[i], collected)
 		}
 	}
-
-	// Collect from oneOrMore
-	for _, oneOrMore := range elem.OneOrMore {
-		for _, subElem := range oneOrMore.Element {
-			if subElem.Name != "" && collected[subElem.Name] == nil {
-				collected[subElem.Name] = &subElem
-				collectNestedElements(&subElem, collected)
-			}
+	for zi := range elem.ZeroOrMore {
+		for i := range elem.ZeroOrMore[zi].Element {
+			collectVariant(&elem.ZeroOrMore[zi].Element[i], collected)
 		}
 	}
-
-	// Collect from zeroOrMore
-	for _, zeroOrMore := range elem.ZeroOrMore {
-		for _, subElem := range zeroOrMore.Element {
-			if subElem.Name != "" && collected[subElem.Name] == nil {
-				collected[subElem.Name] = &subElem
-				collectNestedElements(&subElem, collected)
-			}
+	for oi := range elem.Optional {
+		for i := range elem.Optional[oi].Elements {
+			collectVariant(&elem.Optional[oi].Elements[i], collected)
 		}
 	}
-
-	// Collect from optional
-	for _, opt := range elem.Optional {
-		for _, subElem := range opt.Elements {
-			if subElem.Name != "" && collected[subElem.Name] == nil {
-				collected[subElem.Name] = &subElem
-				collectNestedElements(&subElem, collected)
-			}
-		}
-	}
-
-	// Collect from choice
 	if elem.Choice != nil {
 		for i := range elem.Choice.Elements {
-			subElem := &elem.Choice.Elements[i]
-			if subElem.Name != "" && collected[subElem.Name] == nil {
-				collected[subElem.Name] = subElem
-				collectNestedElements(subElem, collected)
-			}
+			collectVariant(&elem.Choice.Elements[i], collected)
 		}
 	}
-
-	// Collect from interleave
-	for i := range elem.Interleave {
-		for j := range elem.Interleave[i].Elements {
-			subElem := &elem.Interleave[i].Elements[j]
-			if subElem.Name != "" && collected[subElem.Name] == nil {
-				collected[subElem.Name] = subElem
-				collectNestedElements(subElem, collected)
-			}
+	for ii := range elem.Interleave {
+		for i := range elem.Interleave[ii].Elements {
+			collectVariant(&elem.Interleave[ii].Elements[i], collected)
 		}
+	}
+}
+
+// collectVariant records subElem as a variant of its element name and, the first
+// time a name is seen, recurses into it. The pointer check avoids re-adding the
+// exact same element, and recursing only on first sight bounds recursion for
+// self-referential elements.
+func collectVariant(subElem *rng.Element, collected map[string][]*rng.Element) {
+	if subElem.Name == "" {
+		return
+	}
+	existing := collected[subElem.Name]
+	for _, e := range existing {
+		if e == subElem {
+			return
+		}
+	}
+	collected[subElem.Name] = append(existing, subElem)
+	if len(existing) == 0 {
+		collectNestedElements(subElem, collected)
 	}
 }
 
@@ -435,15 +475,13 @@ func addDirectElements(typeInfo *TypeInfo, elem *rng.Element, seenFields map[str
 }
 
 // elementFieldType returns the Go type for a field generated from a sub-element.
+// An element that carries attributes or nested content needs its own struct;
+// one whose content is only text/data (and no attributes) maps to a string.
 func elementFieldType(subElem *rng.Element) string {
-	switch {
-	case subElem.Text != nil:
-		return stringType
-	case hasNestedContent(subElem):
+	if len(subElem.Attributes) > 0 || hasNestedContent(subElem) {
 		return toGoTypeName(subElem.Name)
-	default:
-		return stringType
 	}
+	return stringType
 }
 
 // addChoiceFields generates fields for an element-level <choice>. Go struct tags

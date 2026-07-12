@@ -29,28 +29,28 @@ type bctx struct {
 }
 
 type builder struct {
-	defineRaw map[string][]byte // define name -> its raw content
-	defineCtx map[string]bctx   // define name -> its base context
-	built     map[string]pat    // memoized define patterns
-	building  map[string]bool   // cycle guard while building defines
+	defs      map[string]*rng.Define // define name -> parsed define
+	defineCtx map[string]bctx        // define name -> its base context
+	built     map[string]pat         // memoized define patterns
+	building  map[string]bool        // cycle guard while building defines
 }
 
 // buildGrammar translates a grammar into (start pattern, define env). It returns
 // errUnsupported if any construct cannot be faithfully translated.
 func buildGrammar(g *rng.Grammar) (pat, map[string]pat, error) {
 	b := &builder{
-		defineRaw: map[string][]byte{},
+		defs:      map[string]*rng.Define{},
 		defineCtx: map[string]bctx{},
 		built:     map[string]pat{},
 		building:  map[string]bool{},
 	}
-	// Namespace inheritance from <div>/<include> and combine-merge of defines
-	// are applied by the parser into structured fields but not into RawContent,
-	// which this builder reads. Defer such grammars to the legacy engine rather
-	// than translate them from stale raw content.
+	// Namespace inheritance from <div>/<include> and nested-grammar unpacking are
+	// applied by the parser into structured fields but not into RawContent, which
+	// this builder reads. Defer such grammars to the legacy engine rather than
+	// translate them from stale raw content. (combine-merged defines, whose
+	// RawContent is likewise empty, are handled below from structured fields.)
 	if raw := string(g.RawContent); strings.Contains(raw, "<include") ||
 		strings.Contains(raw, "<externalRef") ||
-		strings.Contains(raw, "combine=") ||
 		strings.Contains(raw, "<div") ||
 		strings.Contains(raw, "<grammar") || // nested grammar (unpacked into structured fields)
 		strings.Contains(raw, "parentRef") {
@@ -61,33 +61,24 @@ func buildGrammar(g *rng.Grammar) (pat, map[string]pat, error) {
 
 	for i := range g.Defines {
 		d := &g.Defines[i]
-		raw := d.RawContent
-		if len(bytes.TrimSpace(raw)) == 0 {
-			// Combine-merged or otherwise structurally-only defines are not
-			// represented in RawContent; defer the whole grammar.
-			return nil, nil, errUnsupported
-		}
-		if _, dup := b.defineRaw[d.Name]; dup {
+		if _, dup := b.defs[d.Name]; dup {
 			// Two defines with the same name that were not merged: defer.
 			return nil, nil, errUnsupported
 		}
-		b.defineRaw[d.Name] = raw
+		b.defs[d.Name] = d
 		b.defineCtx[d.Name] = bctx{ns: "", dtl: firstNonEmpty(d.DatatypeLibrary, grammarDTL)}
 	}
 
 	// Build every define (resolves refs lazily but we materialize all so cycles
 	// and unsupported constructs surface up front).
-	for name := range b.defineRaw {
+	for name := range b.defs {
 		if _, err := b.define(name); err != nil {
 			return nil, nil, err
 		}
 	}
 
-	startRaw := g.Start.RawContent
-	if len(bytes.TrimSpace(startRaw)) == 0 {
-		return nil, nil, errUnsupported
-	}
-	start, err := b.parseSeq(startRaw, bctx{ns: "", dtl: firstNonEmpty(g.Start.DatatypeLibrary, grammarDTL)})
+	startCtx := bctx{ns: "", dtl: firstNonEmpty(g.Start.DatatypeLibrary, grammarDTL)}
+	start, err := b.buildStart(&g.Start, startCtx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -103,18 +94,300 @@ func (b *builder) define(name string) (pat, error) {
 		// derivation time.
 		return pRef{name}, nil
 	}
-	raw, ok := b.defineRaw[name]
+	def, ok := b.defs[name]
 	if !ok {
 		return nil, errUnsupported
 	}
 	b.building[name] = true
-	p, err := b.parseSeq(raw, b.defineCtx[name])
+	p, err := b.buildDefine(def, b.defineCtx[name])
 	delete(b.building, name)
 	if err != nil {
 		return nil, err
 	}
 	b.built[name] = p
 	return p, nil
+}
+
+// buildDefine builds a define's pattern from its RawContent, or — when that is
+// empty, as for combine-merged defines — from its structured fields.
+func (b *builder) buildDefine(def *rng.Define, ctx bctx) (pat, error) {
+	if len(bytes.TrimSpace(def.RawContent)) > 0 {
+		return b.parseSeq(def.RawContent, ctx)
+	}
+	return b.defineFromStruct(def, ctx)
+}
+
+// buildStart builds the start pattern from RawContent, or from structured fields
+// when RawContent is empty (a combine-merged start).
+func (b *builder) buildStart(start *rng.Start, ctx bctx) (pat, error) {
+	if len(bytes.TrimSpace(start.RawContent)) > 0 {
+		return b.parseSeq(start.RawContent, ctx)
+	}
+	return b.startFromStruct(start, ctx)
+}
+
+// ---- structured-fields builders --------------------------------------------
+//
+// combine-merged defines and starts have empty RawContent and carry their merged
+// alternatives in structured Choice/Interleave fields. These builders translate
+// those structured fields; each alternative element's own content is still read
+// from that element's RawContent.
+
+func (b *builder) defineFromStruct(def *rng.Define, ctx bctx) (pat, error) {
+	switch {
+	case def.Choice != nil:
+		return b.choiceStruct(def.Choice, ctx)
+	case len(def.Interleave) > 0:
+		return b.interleaveList(def.Interleave, ctx)
+	case len(def.Elements) > 0:
+		return b.elementsGroup(def.Elements, ctx)
+	case def.Ref != nil:
+		return pRef{def.Ref.Name}, nil
+	case def.Empty != nil:
+		return empty, nil
+	case def.NotAllowed != nil:
+		return notAllowed, nil
+	default:
+		return nil, errUnsupported
+	}
+}
+
+func (b *builder) startFromStruct(start *rng.Start, ctx bctx) (pat, error) {
+	switch {
+	case start.Ref != nil:
+		return pRef{start.Ref.Name}, nil
+	case start.Choice != nil:
+		return b.choiceStruct(start.Choice, ctx)
+	case start.Element != nil:
+		return b.elementFromStruct(start.Element, ctx)
+	case len(start.Interleave) > 0:
+		return b.interleaveList(start.Interleave, ctx)
+	case start.Empty != nil:
+		return empty, nil
+	case start.NotAllowed != nil:
+		return notAllowed, nil
+	default:
+		return nil, errUnsupported
+	}
+}
+
+func (b *builder) elementsGroup(els []rng.Element, ctx bctx) (pat, error) {
+	var parts []pat
+	for i := range els {
+		p, err := b.elementFromStruct(&els[i], ctx)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, p)
+	}
+	return groupAll(parts), nil
+}
+
+func (b *builder) interleaveList(ils []rng.Interleave, ctx bctx) (pat, error) {
+	var parts []pat
+	for i := range ils {
+		p, err := b.interleaveStruct(&ils[i], ctx)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, p)
+	}
+	return interleaveAll(parts), nil
+}
+
+func (b *builder) choiceStruct(ch *rng.Choice, ctx bctx) (pat, error) {
+	cctx := ctx
+	if ch.Ns != "" {
+		cctx.ns = ch.Ns
+	}
+	if ch.DatatypeLibrary != "" {
+		cctx.dtl = ch.DatatypeLibrary
+	}
+	// Content kinds this structured path does not translate: defer.
+	if len(ch.Attributes) > 0 || len(ch.Interleave) > 0 || ch.List != nil ||
+		ch.Mixed != nil || ch.ExternalRef != nil || len(ch.NameElements) > 0 ||
+		len(ch.Values) > 0 || len(ch.Data) > 0 {
+		return nil, errUnsupported
+	}
+	var alts []pat
+	for i := range ch.Elements {
+		p, err := b.elementFromStruct(&ch.Elements[i], cctx)
+		if err != nil {
+			return nil, err
+		}
+		alts = append(alts, p)
+	}
+	for _, ref := range ch.Refs {
+		alts = append(alts, pRef{ref.Name})
+	}
+	for i := range ch.Group {
+		p, err := b.groupStruct(&ch.Group[i], cctx)
+		if err != nil {
+			return nil, err
+		}
+		alts = append(alts, p)
+	}
+	if ch.Text != nil {
+		alts = append(alts, anyText)
+	}
+	if ch.Empty != nil {
+		alts = append(alts, empty)
+	}
+	if ch.NotAllowed != nil {
+		alts = append(alts, notAllowed)
+	}
+	if len(alts) == 0 {
+		return nil, errUnsupported
+	}
+	return choiceAll(alts), nil
+}
+
+func (b *builder) interleaveStruct(il *rng.Interleave, ctx bctx) (pat, error) {
+	ictx := ctx
+	if il.Ns != "" {
+		ictx.ns = il.Ns
+	}
+	if il.DatatypeLibrary != "" {
+		ictx.dtl = il.DatatypeLibrary
+	}
+	if len(il.Attributes) > 0 || len(il.Choice) > 0 || len(il.Optional) > 0 ||
+		len(il.OneOrMore) > 0 || len(il.ZeroOrMore) > 0 || il.List != nil ||
+		il.Data != nil || len(il.Value) > 0 || il.NotAllowed != nil || il.ExternalRef != nil {
+		return nil, errUnsupported
+	}
+	var parts []pat
+	for i := range il.Elements {
+		p, err := b.elementFromStruct(&il.Elements[i], ictx)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, p)
+	}
+	for _, ref := range il.Ref {
+		parts = append(parts, pRef{ref.Name})
+	}
+	for i := range il.Group {
+		p, err := b.groupStruct(&il.Group[i], ictx)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, p)
+	}
+	if il.Text != nil {
+		parts = append(parts, anyText)
+	}
+	if len(parts) == 0 {
+		return nil, errUnsupported
+	}
+	return interleaveAll(parts), nil
+}
+
+func (b *builder) groupStruct(g *rng.Group, ctx bctx) (pat, error) {
+	gctx := ctx
+	if g.Ns != "" {
+		gctx.ns = g.Ns
+	}
+	if g.DatatypeLibrary != "" {
+		gctx.dtl = g.DatatypeLibrary
+	}
+	if len(g.Attributes) > 0 || len(g.Optional) > 0 || len(g.OneOrMore) > 0 ||
+		len(g.ZeroOrMore) > 0 || len(g.Choice) > 0 || len(g.Group) > 0 ||
+		len(g.Interleave) > 0 || g.Text != nil || g.List != nil ||
+		len(g.Value) > 0 || len(g.Data) > 0 || g.NotAllowed != nil || g.ExternalRef != nil {
+		return nil, errUnsupported
+	}
+	var parts []pat
+	for i := range g.Elements {
+		p, err := b.elementFromStruct(&g.Elements[i], gctx)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, p)
+	}
+	for _, ref := range g.Ref {
+		parts = append(parts, pRef{ref.Name})
+	}
+	if len(parts) == 0 {
+		return nil, errUnsupported
+	}
+	return groupAll(parts), nil
+}
+
+// elementFromStruct builds an element pattern from a parsed rng.Element: the name
+// class comes from the (normalized) structured fields, its content from the
+// element's own RawContent.
+func (b *builder) elementFromStruct(el *rng.Element, ctx bctx) (pat, error) {
+	nc, err := ncFromElementStruct(el, ctx)
+	if err != nil {
+		return nil, err
+	}
+	childCtx := ctx
+	if el.Ns != "" {
+		childCtx.ns = el.Ns
+	}
+	if el.DatatypeLibrary != "" {
+		childCtx.dtl = el.DatatypeLibrary
+	}
+	if len(bytes.TrimSpace(el.RawContent)) == 0 {
+		// Empty raw content is either a genuinely empty element or one whose
+		// content the parser moved into structured fields (nested-grammar
+		// unpacking, which this path does not read). Defer the latter.
+		if elementHasStructuredContent(el) {
+			return nil, errUnsupported
+		}
+		return pElem{nc: nc, p: empty}, nil
+	}
+	content, err := b.parseSeq(el.RawContent, childCtx)
+	if err != nil {
+		return nil, err
+	}
+	return pElem{nc: nc, p: content}, nil
+}
+
+// elementHasStructuredContent reports whether an element carries content in
+// structured fields (as opposed to RawContent).
+func elementHasStructuredContent(el *rng.Element) bool {
+	return el.Text != nil || el.Data != nil || len(el.Values) > 0 || el.List != nil ||
+		len(el.Ref) > 0 || len(el.ParentRef) > 0 || len(el.Elements) > 0 ||
+		el.Choice != nil || len(el.Group) > 0 || len(el.Interleave) > 0 ||
+		len(el.Optional) > 0 || len(el.OneOrMore) > 0 || len(el.ZeroOrMore) > 0 ||
+		el.Mixed != nil || el.Empty != nil || el.NotAllowed != nil || len(el.Attributes) > 0
+}
+
+func ncFromElementStruct(el *rng.Element, ctx bctx) (nameClass, error) {
+	switch {
+	case el.Name != "":
+		if strings.Contains(el.Name, ":") {
+			return nil, errUnsupported
+		}
+		return ncName{ns: firstNonEmpty(el.Ns, ctx.ns), local: el.Name}, nil
+	case el.NameElement != nil:
+		ne := el.NameElement
+		local := ne.LocalName
+		if local == "" {
+			local = strings.TrimSpace(ne.Value)
+		}
+		if strings.Contains(local, ":") {
+			return nil, errUnsupported
+		}
+		ns := ne.Namespace
+		if ns == "" {
+			ns = firstNonEmpty(ne.Ns, ctx.ns)
+		}
+		return ncName{ns: ns, local: local}, nil
+	case el.AnyName != nil:
+		if el.AnyName.Except != nil {
+			return nil, errUnsupported
+		}
+		return ncAny{}, nil
+	case el.NsName != nil:
+		if el.NsName.Except != nil {
+			return nil, errUnsupported
+		}
+		return ncNs{ns: el.NsName.Ns}, nil
+	default:
+		return nil, errUnsupported
+	}
 }
 
 // parseSeq parses a run of sibling patterns (the inner content of a container)
