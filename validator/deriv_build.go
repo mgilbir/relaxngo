@@ -394,8 +394,7 @@ func (b *builder) groupStruct(g *rng.Group, ctx bctx) (pat, error) {
 		gctx.dtl = g.DatatypeLibrary
 	}
 	if len(g.Attributes) > 0 || len(g.Optional) > 0 || len(g.OneOrMore) > 0 ||
-		len(g.ZeroOrMore) > 0 || len(g.Choice) > 0 || len(g.Group) > 0 ||
-		len(g.Interleave) > 0 || g.List != nil ||
+		len(g.ZeroOrMore) > 0 || g.List != nil ||
 		len(g.Value) > 0 || len(g.Data) > 0 || g.ExternalRef != nil {
 		return nil, errUnsupported
 	}
@@ -409,6 +408,27 @@ func (b *builder) groupStruct(g *rng.Group, ctx bctx) (pat, error) {
 	}
 	for _, ref := range g.Ref {
 		parts = append(parts, pRef{ref.Name})
+	}
+	for i := range g.Group {
+		p, err := b.groupStruct(&g.Group[i], gctx)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, p)
+	}
+	for i := range g.Choice {
+		p, err := b.choiceStruct(&g.Choice[i], gctx)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, p)
+	}
+	for i := range g.Interleave {
+		p, err := b.interleaveStruct(&g.Interleave[i], gctx)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, p)
 	}
 	if g.Text != nil {
 		parts = append(parts, anyText)
