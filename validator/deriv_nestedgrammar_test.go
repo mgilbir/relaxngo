@@ -36,3 +36,33 @@ func TestDeriv_RecursiveNestedGrammar(t *testing.T) {
 	valid(t, v, `<foo/>`)
 	invalid(t, v, `<bar/>`)
 }
+
+// A nested grammar using parentRef (a reference to the enclosing grammar's
+// define) must validate on the derivative engine.
+func TestDeriv_ParentRef(t *testing.T) {
+	v := mustValidator(t, `<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+<start>
+  <grammar>
+    <start><ref name="foo"/></start>
+    <define name="foo"><element name="innerFoo"><parentRef name="foo"/></element></define>
+  </grammar>
+</start>
+<define name="foo"><element name="outerFoo"><empty/></element></define>
+</grammar>`)
+	valid(t, v, `<innerFoo><outerFoo/></innerFoo>`)
+	invalid(t, v, `<outerFoo/>`)
+	invalid(t, v, `<innerFoo/>`)
+}
+
+// A <div ns="..."> applies its namespace to the element names it contains; the
+// derivative engine must honor it.
+func TestDeriv_DivNamespace(t *testing.T) {
+	v := mustValidator(t, `<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+<div ns="urn:x">
+  <start><ref name="foo"/></start>
+  <define name="foo"><element name="foo"><empty/></element></define>
+</div>
+</grammar>`)
+	valid(t, v, `<foo xmlns="urn:x"/>`)
+	invalid(t, v, `<foo/>`) // wrong namespace
+}
