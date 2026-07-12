@@ -171,34 +171,34 @@ func TestCachedValidatorOptions(t *testing.T) {
 
 	// Create with default options
 	opts := DefaultOptions()
-	opts.FailFast = false
-	opts.MaxErrors = 100
+	opts.MaxDepth = 100
+	opts.MaxDocumentBytes = 1000
 
 	cv := NewCachedValidatorFromGrammar(grammar, opts)
 
 	// Get options
 	retrievedOpts := cv.GetOptions()
-	if retrievedOpts.FailFast != false {
-		t.Error("FailFast option mismatch")
+	if retrievedOpts.MaxDepth != 100 {
+		t.Error("MaxDepth option mismatch")
 	}
-	if retrievedOpts.MaxErrors != 100 {
-		t.Error("MaxErrors option mismatch")
+	if retrievedOpts.MaxDocumentBytes != 1000 {
+		t.Error("MaxDocumentBytes option mismatch")
 	}
 
 	// Update options
 	newOpts := DefaultOptions()
-	newOpts.FailFast = true
-	newOpts.MaxErrors = 10
+	newOpts.MaxDepth = 10
+	newOpts.MaxDocumentBytes = 2000
 
 	cv.UpdateOptions(newOpts)
 
 	// Verify update
 	retrievedOpts = cv.GetOptions()
-	if !retrievedOpts.FailFast {
-		t.Error("FailFast was not updated")
+	if retrievedOpts.MaxDepth != 10 {
+		t.Error("MaxDepth was not updated")
 	}
-	if retrievedOpts.MaxErrors != 10 {
-		t.Error("MaxErrors was not updated")
+	if retrievedOpts.MaxDocumentBytes != 2000 {
+		t.Error("MaxDocumentBytes was not updated")
 	}
 }
 

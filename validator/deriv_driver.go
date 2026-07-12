@@ -47,7 +47,7 @@ type elemNode struct {
 
 // validateDerivative validates data against the translated grammar.
 func (v *Validator) validateDerivative(data []byte) ([]ValidationError, error) {
-	root, err := buildDocTree(data)
+	root, err := buildDocTree(data, v.options.MaxDepth)
 	if err != nil {
 		return nil, fmt.Errorf("XML parsing error: %w", err)
 	}
@@ -168,7 +168,7 @@ func (d *deriver) report(errs *[]ValidationError, e *elemNode, msg string) {
 
 // ---- document tree construction --------------------------------------------
 
-func buildDocTree(data []byte) (*elemNode, error) {
+func buildDocTree(data []byte, maxDepth int) (*elemNode, error) {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	for {
 		off := dec.InputOffset()
@@ -180,7 +180,7 @@ func buildDocTree(data []byte) (*elemNode, error) {
 			return nil, err
 		}
 		if se, ok := tok.(xml.StartElement); ok {
-			root, err := readElement(dec, data, se, off)
+			root, err := readElement(dec, data, se, off, 1, maxDepth)
 			if err != nil {
 				return nil, err
 			}
@@ -218,7 +218,10 @@ func expectNoTrailingContent(dec *xml.Decoder) error {
 	}
 }
 
-func readElement(dec *xml.Decoder, data []byte, se xml.StartElement, startOff int64) (*elemNode, error) {
+func readElement(dec *xml.Decoder, data []byte, se xml.StartElement, startOff int64, depth, maxDepth int) (*elemNode, error) {
+	if maxDepth > 0 && depth > maxDepth {
+		return nil, fmt.Errorf("element nesting exceeds maximum depth of %d", maxDepth)
+	}
 	line, col := offsetToLineCol(data, int(startOff))
 	n := &elemNode{ns: se.Name.Space, local: se.Name.Local, line: line, col: col}
 	for _, a := range se.Attr {
@@ -244,7 +247,7 @@ func readElement(dec *xml.Decoder, data []byte, se xml.StartElement, startOff in
 		switch t := tok.(type) {
 		case xml.StartElement:
 			flush()
-			child, err := readElement(dec, data, t, off)
+			child, err := readElement(dec, data, t, off, depth+1, maxDepth)
 			if err != nil {
 				return nil, err
 			}

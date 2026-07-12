@@ -44,22 +44,32 @@ func (e *ValidationError) Error() string {
 }
 
 // ValidationOptions configures validation behavior.
+//
+// The derivative engine reports a single located failure per document, so there
+// is no multi-error or fail-fast knob. The options that remain bound resource
+// use, guarding against untrusted input.
 type ValidationOptions struct {
-	FailFast       bool // Stop at first error
-	MaxErrors      int  // Maximum errors to collect (0 = unlimited)
-	MaxDepth       int  // Maximum nesting depth (0 = unlimited)
-	MaxInterleave  int  // Maximum interleave branches (default 100)
-	CollectUnknown bool // Collect unknown elements/attributes as warnings
+	// MaxDepth caps element nesting depth; a deeper document is rejected before
+	// the tree is built. Guards against stack exhaustion from pathological input
+	// like <a><a><a>… repeated millions of times. 0 means unlimited.
+	MaxDepth int
+	// MaxDocumentBytes caps the document size read into memory. A larger document
+	// is rejected without being fully buffered. 0 means unlimited.
+	MaxDocumentBytes int64
 }
+
+// Default resource limits. Both are generous enough for any realistic document
+// while still bounding what untrusted input can consume.
+const (
+	defaultMaxDepth         = 5000
+	defaultMaxDocumentBytes = 50 << 20 // 50 MiB
+)
 
 // DefaultOptions returns sensible default validation options.
 func DefaultOptions() ValidationOptions {
 	return ValidationOptions{
-		FailFast:       false,
-		MaxErrors:      100,
-		MaxDepth:       100,
-		MaxInterleave:  100,
-		CollectUnknown: false,
+		MaxDepth:         defaultMaxDepth,
+		MaxDocumentBytes: defaultMaxDocumentBytes,
 	}
 }
 
@@ -85,10 +95,27 @@ func NewValidator(grammar *rng.Grammar, options ValidationOptions) *Validator {
 // construct the builder cannot translate it returns an error rather than a
 // (possibly wrong) result.
 func (v *Validator) Validate(r io.Reader) ([]ValidationError, error) {
+	if limit := v.options.MaxDocumentBytes; limit > 0 {
+		// Read one byte past the limit so we can tell "exactly at the limit"
+		// (allowed) from "over the limit" (rejected) without buffering the rest.
+		r = io.LimitReader(r, limit+1)
+		data, err := io.ReadAll(r)
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(data)) > limit {
+			return nil, fmt.Errorf("validator: document exceeds MaxDocumentBytes limit of %d bytes", limit)
+		}
+		return v.validateData(data)
+	}
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return nil, err
 	}
+	return v.validateData(data)
+}
+
+func (v *Validator) validateData(data []byte) ([]ValidationError, error) {
 	if v.deriv == nil {
 		return nil, fmt.Errorf("validator: schema uses a construct that is not supported")
 	}
