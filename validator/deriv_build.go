@@ -92,10 +92,11 @@ func withNsDecls(ctx bctx, attrs []xml.Attr) bctx {
 }
 
 type builder struct {
-	defs      map[string]*rng.Define // define name -> parsed define
-	defineCtx map[string]bctx        // define name -> its base context
-	built     map[string]pat         // memoized define patterns
-	building  map[string]bool        // cycle guard while building defines
+	defs         map[string]*rng.Define // define name -> parsed define
+	defineCtx    map[string]bctx        // define name -> its base context
+	built        map[string]pat         // memoized define patterns
+	building     map[string]bool        // cycle guard while building defines
+	preferStruct bool                   // build names from structured fields (div/include applied a namespace)
 }
 
 // buildGrammar translates a grammar into (start pattern, define env). It returns
@@ -120,11 +121,15 @@ func buildGrammar(g *rng.Grammar) (pat, map[string]pat, error) {
 	// Nested grammars are unpacked by the parser into structured fields (which
 	// are now consistent across parse paths); the define/start/element builders
 	// read them from there, deferring per-construct on parentRef.
-	if raw := string(g.RawContent); strings.Contains(raw, "<externalRef") ||
-		strings.Contains(raw, "<div") ||
-		strings.Contains(raw, "parentRef") ||
-		includeUsesNs(raw) {
+	raw := string(g.RawContent)
+	if strings.Contains(raw, "<externalRef") {
 		return nil, nil, errUnsupported
+	}
+	// <div ns="..."> and <include ns="..."> apply a namespace to element names
+	// that lives only in structured fields. Build names/refs from structured
+	// fields rather than the (unnamespaced) RawContent for these grammars.
+	if strings.Contains(raw, "<div") || includeUsesNs(raw) {
+		b.preferStruct = true
 	}
 
 	grammarDTL := g.DatatypeLibrary
@@ -182,17 +187,30 @@ func (b *builder) define(name string) (pat, error) {
 // fields when RawContent is empty (combine-merged) or a stale nested-grammar
 // remnant.
 func (b *builder) buildDefine(def *rng.Define, ctx bctx) (pat, error) {
-	if raw := def.RawContent; len(bytes.TrimSpace(raw)) > 0 && !bytes.Contains(raw, []byte("<grammar")) {
-		return b.parseSeq(raw, ctx)
+	if !b.preferStruct {
+		if raw := def.RawContent; len(bytes.TrimSpace(raw)) > 0 && !bytes.Contains(raw, []byte("<grammar")) {
+			return b.parseSeq(raw, ctx)
+		}
 	}
 	return b.defineFromStruct(def, ctx)
 }
 
-// buildStart builds the start pattern from RawContent, or from structured fields
-// when RawContent is empty (combine-merged) or a stale nested-grammar remnant.
+// buildStart builds the start pattern. A structured start ref/parentRef is the
+// parser's resolved (and possibly renamed, after nested-grammar unpacking)
+// reference and takes precedence over a stale RawContent ref. Otherwise build
+// from RawContent, or from structured fields when RawContent is empty
+// (combine-merged) or a stale nested-grammar remnant.
 func (b *builder) buildStart(start *rng.Start, ctx bctx) (pat, error) {
-	if raw := start.RawContent; len(bytes.TrimSpace(raw)) > 0 && !bytes.Contains(raw, []byte("<grammar")) {
-		return b.parseSeq(raw, ctx)
+	if start.Ref != nil {
+		return pRef{start.Ref.Name}, nil
+	}
+	if start.ParentRef != nil {
+		return pRef{start.ParentRef.Name}, nil
+	}
+	if !b.preferStruct {
+		if raw := start.RawContent; len(bytes.TrimSpace(raw)) > 0 && !bytes.Contains(raw, []byte("<grammar")) {
+			return b.parseSeq(raw, ctx)
+		}
 	}
 	return b.startFromStruct(start, ctx)
 }
@@ -214,6 +232,8 @@ func (b *builder) defineFromStruct(def *rng.Define, ctx bctx) (pat, error) {
 		return b.elementsGroup(def.Elements, ctx)
 	case def.Ref != nil:
 		return pRef{def.Ref.Name}, nil
+	case def.ParentRef != nil:
+		return pRef{def.ParentRef.Name}, nil
 	case def.Empty != nil:
 		return empty, nil
 	case def.NotAllowed != nil:
@@ -227,6 +247,8 @@ func (b *builder) startFromStruct(start *rng.Start, ctx bctx) (pat, error) {
 	switch {
 	case start.Ref != nil:
 		return pRef{start.Ref.Name}, nil
+	case start.ParentRef != nil:
+		return pRef{start.ParentRef.Name}, nil
 	case start.Choice != nil:
 		return b.choiceStruct(start.Choice, ctx)
 	case start.Element != nil:
@@ -547,7 +569,7 @@ func foreignElem(se xml.StartElement) bool {
 // structured fields) and on parentRef.
 func (b *builder) structuredElementContent(el *rng.Element, ctx bctx) (pat, error) {
 	if len(el.Optional) > 0 || len(el.OneOrMore) > 0 || len(el.ZeroOrMore) > 0 ||
-		el.Mixed != nil || el.List != nil || len(el.ParentRef) > 0 || len(el.Attributes) > 0 {
+		el.Mixed != nil || el.List != nil || len(el.Attributes) > 0 {
 		return nil, errUnsupported
 	}
 	var parts []pat
@@ -559,6 +581,9 @@ func (b *builder) structuredElementContent(el *rng.Element, ctx bctx) (pat, erro
 		parts = append(parts, p)
 	}
 	for _, ref := range el.Ref {
+		parts = append(parts, pRef{ref.Name})
+	}
+	for _, ref := range el.ParentRef {
 		parts = append(parts, pRef{ref.Name})
 	}
 	if el.Choice != nil {
@@ -778,14 +803,13 @@ func (b *builder) parseElementToken(dec *xml.Decoder, se xml.StartElement, ctx c
 	case "mixed":
 		return b.parseContainer(dec, se, childCtx, func(ps []pat) pat { return interleave(groupAll(ps), anyText) })
 	case "ref", "parentRef":
+		// After nested-grammar unpacking the parent grammar's defines are
+		// top-level, so a parentRef resolves like a ref to a top-level define.
 		name, _ := attr(se, "name")
 		if err := skipElement(dec, se); err != nil {
 			return nil, err
 		}
-		if local == "parentRef" {
-			return nil, errUnsupported // nested-grammar parentRef
-		}
-		return pRef{name}, nil
+		return pRef{strings.TrimSpace(name)}, nil
 	case "text":
 		return anyText, skipElement(dec, se)
 	case "empty":

@@ -34,7 +34,7 @@ func TestDeriv_IncludeWithoutNamespace(t *testing.T) {
 		invalid(t, v, `<bar>hi</bar>`)
 	})
 
-	t.Run("with namespace falls back", func(t *testing.T) {
+	t.Run("with namespace applies the include namespace", func(t *testing.T) {
 		writeFile(t, dir, "mainns.rng", `<grammar xmlns="http://relaxng.org/ns/structure/1.0">
   <include href="inc.rng" ns="urn:x"/>
 </grammar>`)
@@ -43,10 +43,11 @@ func TestDeriv_IncludeWithoutNamespace(t *testing.T) {
 			t.Fatal(err)
 		}
 		v := NewValidator(g, DefaultOptions())
-		if v.deriv != nil {
-			t.Error("include with namespace should fall back to the legacy engine")
+		if v.deriv == nil {
+			t.Fatal("include with namespace should build from structured fields on the derivative engine")
 		}
 		valid(t, v, `<foo xmlns="urn:x">hi</foo>`)
+		invalid(t, v, `<foo>hi</foo>`) // element must be in urn:x
 	})
 }
 
