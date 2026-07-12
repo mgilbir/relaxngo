@@ -6074,6 +6074,15 @@ func (g *Grammar) unpackNestedGrammarInDefine(def *Define, newDefines *[]Define)
 		*newDefines = append(*newDefines, nestedDefs...)
 	}
 
+	// When the nested grammar was the content of an element wrapper (e.g.
+	// define foo { element outerFoo { <grammar>...</grammar> } }), the nested
+	// start's pattern is the element's content — not the define's. Placing it at
+	// the define level instead would drop the wrapping element on serialization.
+	if len(def.Elements) > 0 && bytes.Contains(def.Elements[0].RawContent, []byte("<grammar")) {
+		applyNestedStartToElement(&def.Elements[0], nestedStart, def.Name)
+		return true, nil
+	}
+
 	// Transfer the nested grammar's start pattern to the define
 	// Note: Define only supports a subset of Start's fields
 	// Also, update ref/parentRef names to use the context prefix
@@ -6103,6 +6112,61 @@ func (g *Grammar) unpackNestedGrammarInDefine(def *Define, newDefines *[]Define)
 	}
 
 	return true, nil
+}
+
+// applyNestedStartToElement makes the unpacked nested-grammar start pattern the
+// content of the wrapping element el, clearing the now-stale raw grammar. Ref
+// names are prefixed with the enclosing define name to match the renamed
+// nested defines; parentRef names are left as-is (they target the parent grammar).
+func applyNestedStartToElement(el *Element, nestedStart *Start, defName string) {
+	el.RawContent = nil
+
+	if nestedStart.Ref != nil {
+		ref := *nestedStart.Ref
+		if ref.Name != "" {
+			ref.Name = defName + "_" + ref.Name
+		}
+		el.Ref = []Ref{ref}
+	}
+	if nestedStart.ParentRef != nil {
+		el.ParentRef = []Ref{*nestedStart.ParentRef}
+	}
+	if nestedStart.Element != nil {
+		el.Elements = []Element{*nestedStart.Element}
+	}
+	if nestedStart.Choice != nil {
+		el.Choice = nestedStart.Choice
+	}
+	if len(nestedStart.Group) > 0 {
+		el.Group = nestedStart.Group
+	}
+	if len(nestedStart.Interleave) > 0 {
+		el.Interleave = nestedStart.Interleave
+	}
+	if len(nestedStart.Optional) > 0 {
+		el.Optional = nestedStart.Optional
+	}
+	if len(nestedStart.OneOrMore) > 0 {
+		el.OneOrMore = nestedStart.OneOrMore
+	}
+	if len(nestedStart.ZeroOrMore) > 0 {
+		el.ZeroOrMore = nestedStart.ZeroOrMore
+	}
+	if nestedStart.Text != nil {
+		el.Text = nestedStart.Text
+	}
+	if nestedStart.Data != nil {
+		el.Data = nestedStart.Data
+	}
+	if nestedStart.List != nil {
+		el.List = nestedStart.List
+	}
+	if nestedStart.Empty != nil {
+		el.Empty = nestedStart.Empty
+	}
+	if nestedStart.NotAllowed != nil {
+		el.NotAllowed = nestedStart.NotAllowed
+	}
 }
 
 // applyNestedGrammarToStart applies a nested grammar found in Start's RawContent
