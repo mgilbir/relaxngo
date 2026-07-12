@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/mgilbir/relaxngo/rng"
 )
@@ -2602,8 +2603,9 @@ func (ctx *validationContext) matchPattern(value, pattern string) bool {
 		return false
 	}
 
-	// Note: Go's regexp package is not vulnerable to catastrophic backtracking
-	// because it uses backtracking with memoization, but we add a length limit as extra safety
+	// Go's regexp package uses RE2 (linear-time automata), so it is not
+	// vulnerable to catastrophic backtracking; the length limit above is extra
+	// safety against pathological compile times.
 	regex := cachedRegex(pattern)
 	if regex == nil {
 		return false
@@ -2611,11 +2613,20 @@ func (ctx *validationContext) matchPattern(value, pattern string) bool {
 	return regex.MatchString(value)
 }
 
-// Compile regex patterns with caching to avoid recompilation
-var regexCache = make(map[string]*regexp.Regexp)
+// regexCache memoizes compiled facet patterns across validations. It is a
+// process-global shared by every Validator, so all access must go through its
+// mutex — concurrent map access is otherwise a data race and a runtime panic,
+// which would break the documented support for concurrent validation.
+var (
+	regexCacheMu sync.RWMutex
+	regexCache   = make(map[string]*regexp.Regexp)
+)
 
 func cachedRegex(pattern string) *regexp.Regexp {
-	if cached, ok := regexCache[pattern]; ok {
+	regexCacheMu.RLock()
+	cached, ok := regexCache[pattern]
+	regexCacheMu.RUnlock()
+	if ok {
 		return cached
 	}
 
@@ -2625,10 +2636,12 @@ func cachedRegex(pattern string) *regexp.Regexp {
 		return nil
 	}
 
-	// Cache only if not too many patterns (prevent unbounded memory growth)
+	// Cache only if not too many patterns (prevent unbounded memory growth).
+	regexCacheMu.Lock()
 	if len(regexCache) < 100 {
 		regexCache[pattern] = regex
 	}
+	regexCacheMu.Unlock()
 
 	return regex
 }
