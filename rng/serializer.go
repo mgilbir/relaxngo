@@ -192,7 +192,12 @@ func serializeDefineContent(sb *strings.Builder, def *Define, indent int) {
 
 func serializeElement(sb *strings.Builder, elem *Element, indent int) {
 	indentStr := strings.Repeat("\t", indent)
-	sb.WriteString(indentStr + "<element name=\"" + escapeXMLAttr(elem.Name) + "\"")
+	sb.WriteString(indentStr + "<element")
+	// A name-class child (<name>/<anyName>/<nsName>/<choice>) supplies the name;
+	// emitting an empty name="" attribute alongside it produces an invalid schema.
+	if elem.Name != "" {
+		sb.WriteString(" name=\"" + escapeXMLAttr(elem.Name) + "\"")
+	}
 	if elem.Ns != "" {
 		sb.WriteString(` ns="` + escapeXMLAttr(elem.Ns) + `"`)
 	}
@@ -203,9 +208,15 @@ func serializeElement(sb *strings.Builder, elem *Element, indent int) {
 
 //nolint:funlen // Element content serialization requires handling all pattern types
 func serializeElementContent(sb *strings.Builder, elem *Element, indent int) {
-	// NameElement (name class)
+	// Name class must be serialized first: <element> content is (nameClass?, pattern).
 	if elem.NameElement != nil {
 		serializeNameElement(sb, elem.NameElement, indent)
+	}
+	if elem.AnyName != nil {
+		serializeAnyName(sb, elem.AnyName, indent)
+	}
+	if elem.NsName != nil {
+		serializeNsName(sb, elem.NsName, indent)
 	}
 
 	// Text content
@@ -291,16 +302,6 @@ func serializeElementContent(sb *strings.Builder, elem *Element, indent int) {
 		serializeMixed(sb, elem.Mixed, indent)
 	}
 
-	// AnyName
-	if elem.AnyName != nil {
-		serializeAnyName(sb, elem.AnyName, indent)
-	}
-
-	// NsName
-	if elem.NsName != nil {
-		serializeNsName(sb, elem.NsName, indent)
-	}
-
 	// NotAllowed
 	if elem.NotAllowed != nil {
 		indentStr := strings.Repeat("\t", indent)
@@ -315,7 +316,11 @@ func serializeElementContent(sb *strings.Builder, elem *Element, indent int) {
 
 func serializeAttribute(sb *strings.Builder, attr *Attribute, indent int) {
 	indentStr := strings.Repeat("\t", indent)
-	sb.WriteString(indentStr + "<attribute name=\"" + escapeXMLAttr(attr.Name) + "\"")
+	sb.WriteString(indentStr + "<attribute")
+	// A name-class child supplies the name; an empty name="" alongside it is invalid.
+	if attr.Name != "" {
+		sb.WriteString(" name=\"" + escapeXMLAttr(attr.Name) + "\"")
+	}
 	if attr.Ns != "" {
 		sb.WriteString(` ns="` + escapeXMLAttr(attr.Ns) + `"`)
 	}
@@ -325,9 +330,15 @@ func serializeAttribute(sb *strings.Builder, attr *Attribute, indent int) {
 }
 
 func serializeAttributeContent(sb *strings.Builder, attr *Attribute, indent int) {
-	// NameElement (name class)
+	// Name class must be serialized first: <attribute> content is (nameClass?, pattern).
 	if attr.NameElement != nil {
 		serializeNameElement(sb, attr.NameElement, indent)
+	}
+	if attr.AnyName != nil {
+		serializeAnyName(sb, attr.AnyName, indent)
+	}
+	if attr.NsName != nil {
+		serializeNsName(sb, attr.NsName, indent)
 	}
 
 	if attr.Choice != nil {
@@ -349,14 +360,6 @@ func serializeAttributeContent(sb *strings.Builder, attr *Attribute, indent int)
 
 	if attr.List != nil {
 		serializeList(sb, attr.List, indent)
-	}
-
-	if attr.AnyName != nil {
-		serializeAnyName(sb, attr.AnyName, indent)
-	}
-
-	if attr.NsName != nil {
-		serializeNsName(sb, attr.NsName, indent)
 	}
 
 	// Text pattern
