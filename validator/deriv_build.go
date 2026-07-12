@@ -22,6 +22,13 @@ import (
 
 var errUnsupported = errors.New("derivative builder: unsupported construct")
 
+// staleRaw reports whether RawContent is a stale remnant left after the parser
+// resolved the real content into structured fields (nested-grammar unpacking or
+// externalRef resolution). Such RawContent must not be parsed directly.
+func staleRaw(raw []byte) bool {
+	return bytes.Contains(raw, []byte("<grammar")) || bytes.Contains(raw, []byte("<externalRef"))
+}
+
 // includeUsesNs reports whether any <include> tag in raw carries an ns
 // attribute (which the parser applies to structured fields only).
 func includeUsesNs(raw string) bool {
@@ -177,9 +184,6 @@ func buildGrammar(g *rng.Grammar) (pat, map[string]pat, error) {
 	// are now consistent across parse paths); the define/start/element builders
 	// read them from there, deferring per-construct on parentRef.
 	raw := string(g.RawContent)
-	if strings.Contains(raw, "<externalRef") {
-		return nil, nil, errUnsupported
-	}
 	// <div ns="..."> and <include ns="..."> apply a namespace to element names
 	// that lives only in structured fields. Build names/refs from structured
 	// fields rather than the (unnamespaced) RawContent for these grammars.
@@ -249,7 +253,7 @@ func (b *builder) define(name string) (pat, error) {
 // remnant.
 func (b *builder) buildDefine(def *rng.Define, ctx bctx) (pat, error) {
 	if !b.preferStruct {
-		if raw := def.RawContent; len(bytes.TrimSpace(raw)) > 0 && !bytes.Contains(raw, []byte("<grammar")) {
+		if raw := def.RawContent; len(bytes.TrimSpace(raw)) > 0 && !staleRaw(raw) {
 			return b.parseSeq(raw, ctx)
 		}
 	}
@@ -269,7 +273,7 @@ func (b *builder) buildStart(start *rng.Start, ctx bctx) (pat, error) {
 		return pRef{start.ParentRef.Name}, nil
 	}
 	if !b.preferStruct {
-		if raw := start.RawContent; len(bytes.TrimSpace(raw)) > 0 && !bytes.Contains(raw, []byte("<grammar")) {
+		if raw := start.RawContent; len(bytes.TrimSpace(raw)) > 0 && !staleRaw(raw) {
 			return b.parseSeq(raw, ctx)
 		}
 	}
@@ -291,6 +295,8 @@ func (b *builder) defineFromStruct(def *rng.Define, ctx bctx) (pat, error) {
 		return b.interleaveList(def.Interleave, ctx)
 	case len(def.Elements) > 0:
 		return b.elementsGroup(def.Elements, ctx)
+	case def.Element != nil: // deprecated singular field, still used by hand-built grammars
+		return b.elementFromStruct(def.Element, ctx)
 	case def.Ref != nil:
 		return pRef{def.Ref.Name}, nil
 	case def.ParentRef != nil:
@@ -527,7 +533,7 @@ func (b *builder) elementFromStruct(el *rng.Element, ctx bctx) (pat, error) {
 		return b.elementFromRawContent(el.RawContent, childCtx)
 	}
 
-	if len(bytes.TrimSpace(el.RawContent)) == 0 || bytes.Contains(el.RawContent, []byte("<grammar")) {
+	if len(bytes.TrimSpace(el.RawContent)) == 0 || staleRaw(el.RawContent) {
 		// Empty raw content, or a stale nested-grammar remnant left in RawContent
 		// after the parser unpacked the real content into structured fields:
 		// build from the structured fields.
@@ -648,10 +654,17 @@ const relaxNGNamespace = "http://relaxng.org/ns/structure/1.0"
 // structured fields) and on parentRef.
 func (b *builder) structuredElementContent(el *rng.Element, ctx bctx) (pat, error) {
 	if len(el.Optional) > 0 || len(el.OneOrMore) > 0 || len(el.ZeroOrMore) > 0 ||
-		el.Mixed != nil || el.List != nil || len(el.Attributes) > 0 {
+		el.Mixed != nil || el.List != nil {
 		return nil, errUnsupported
 	}
 	var parts []pat
+	for i := range el.Attributes {
+		p, err := b.attributeStruct(&el.Attributes[i], ctx)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, p)
+	}
 	for i := range el.Elements {
 		p, err := b.elementFromStruct(&el.Elements[i], ctx)
 		if err != nil {
@@ -731,6 +744,63 @@ func (b *builder) dataStruct(d *rng.Data, ctx bctx) pat {
 		}
 	}
 	return pd
+}
+
+// attributeStruct builds an attribute pattern from a structured rng.Attribute.
+func (b *builder) attributeStruct(a *rng.Attribute, ctx bctx) (pat, error) {
+	var nc nameClass
+	switch {
+	case a.Name != "":
+		if strings.Contains(a.Name, ":") {
+			return nil, errUnsupported
+		}
+		nc = ncName{ns: a.Ns, local: a.Name} // attribute names do not inherit the element namespace
+	case a.NameElement != nil:
+		local := a.NameElement.LocalName
+		if local == "" {
+			local = strings.TrimSpace(a.NameElement.Value)
+		}
+		nc = ncName{ns: a.NameElement.Namespace, local: local}
+	case a.AnyName != nil:
+		n, err := anyNameClassFromStruct(a.AnyName, ctx)
+		if err != nil {
+			return nil, err
+		}
+		nc = n
+	case a.NsName != nil:
+		n, err := nsNameClassFromStruct(a.NsName, ctx)
+		if err != nil {
+			return nil, err
+		}
+		nc = n
+	default:
+		return nil, errUnsupported
+	}
+
+	var valuePat pat
+	switch {
+	case a.Data != nil:
+		valuePat = b.dataStruct(a.Data, ctx)
+	case len(a.Values) > 0:
+		var alts []pat
+		for i := range a.Values {
+			alts = append(alts, valueStruct(&a.Values[i], ctx))
+		}
+		valuePat = choiceAll(alts)
+	case a.Choice != nil:
+		p, err := b.choiceStruct(a.Choice, ctx)
+		if err != nil {
+			return nil, err
+		}
+		valuePat = p
+	case a.Empty != nil:
+		valuePat = empty
+	case a.List != nil:
+		return nil, errUnsupported
+	default:
+		valuePat = anyText // <attribute name="x"/> allows any string
+	}
+	return pAttr{nc: nc, p: valuePat}, nil
 }
 
 func valueStruct(v *rng.Value, ctx bctx) pat {
@@ -857,7 +927,9 @@ func (b *builder) parseSeq(raw []byte, ctx bctx) (pat, error) {
 // se) and consumes tokens through its matching end tag.
 func (b *builder) parseElementToken(dec *xml.Decoder, se xml.StartElement, ctx ctxT) (pat, error) {
 	local := se.Name.Local
-	childCtx := ctx
+	// Inline xmlns declarations on this element are in scope for QNames in its
+	// content's name attributes.
+	childCtx := withNsDecls(ctx, se.Attr)
 	if ns, ok := attr(se, "ns"); ok {
 		childCtx.ns = ns
 	}
