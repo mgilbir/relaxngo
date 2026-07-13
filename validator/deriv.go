@@ -496,6 +496,48 @@ func (d *deriver) expectedElemNs(p pat, local string) (ns string, ok bool) {
 	return walk(p, map[string]bool{})
 }
 
+// expectedElemNames enumerates the concrete element names that p accepts as its
+// next start tag (its "first" set), for populating ValidationError.Expected.
+// It is an over-approximation: it does not prune branches made unreachable by
+// earlier siblings, which is acceptable for a diagnostic hint.
+func (d *deriver) expectedElemNames(p pat) []string {
+	seen := map[string]bool{}
+	var out []string
+	var walk func(pat, map[string]bool)
+	walk = func(p pat, visiting map[string]bool) {
+		switch t := p.(type) {
+		case pElem:
+			if n, ok := t.nc.(ncName); ok && !seen[n.local] {
+				seen[n.local] = true
+				out = append(out, n.local)
+			}
+		case pChoice:
+			walk(t.a, visiting)
+			walk(t.b, visiting)
+		case pGroup:
+			walk(t.a, visiting)
+			if d.nullable(t.a) {
+				walk(t.b, visiting) // b is reachable as "first" only if a can be empty
+			}
+		case pInterleave:
+			walk(t.a, visiting)
+			walk(t.b, visiting)
+		case pOneOrMore:
+			walk(t.p, visiting)
+		case pAfter:
+			walk(t.a, visiting)
+		case pRef:
+			if !visiting[t.name] {
+				visiting[t.name] = true
+				walk(d.resolve(t.name), visiting)
+				delete(visiting, t.name)
+			}
+		}
+	}
+	walk(p, map[string]bool{})
+	return out
+}
+
 // requiredAttrNames collects the concrete attribute names still required by p
 // (used to build a helpful "missing required attribute" message).
 func (d *deriver) requiredAttrNames(p pat) []string {
