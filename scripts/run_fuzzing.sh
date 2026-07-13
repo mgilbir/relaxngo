@@ -1,42 +1,27 @@
 #!/bin/bash
-# Run Go fuzzing against RelaxNGo
-# This script runs comprehensive fuzzing to find edge cases and crashes
+# Run Go fuzzing against relaxngo.
+# Each fuzz target lives in the package it exercises, so it must be run against
+# that package's directory (go test -fuzz runs one target in one package).
 
-set -e
+set -euo pipefail
 
-echo "=== RelaxNGo Fuzzing Suite ==="
-echo ""
-echo "Starting extended fuzzing (this may take a while)..."
-echo ""
+FUZZ_TIME=${1:-30s} # Duration per target (default 30s); pass e.g. 2m for longer runs.
 
-FUZZ_TIME=${1:-30s}  # Default 30 seconds per target, or pass custom time
+cd "$(dirname "$0")/.."
 
-echo "Target 1: FuzzParseSchema (RELAX NG schema parsing)"
-echo "  Duration: $FUZZ_TIME per run"
-echo "  Running..."
-timeout 120 go test -fuzz=FuzzParseSchema -fuzztime="$FUZZ_TIME" . || true
-echo "  ✓ Completed"
-echo ""
+echo "=== relaxngo fuzzing suite (${FUZZ_TIME} per target) ==="
 
-echo "Target 2: FuzzValidateXML (XML validation against schemas)"
-echo "  Duration: $FUZZ_TIME per run"
-echo "  Running..."
-timeout 120 go test -fuzz=FuzzValidateXML -fuzztime="$FUZZ_TIME" . || true
-echo "  ✓ Completed"
-echo ""
+run() {
+	local pkg=$1 target=$2
+	echo ""
+	echo ">>> ${target} (${pkg})"
+	go test "${pkg}" -run '^$' -fuzz="^${target}\$" -fuzztime="${FUZZ_TIME}"
+}
 
-echo "Target 3: FuzzGenerateCode (Type generation from schemas)"
-echo "  Duration: $FUZZ_TIME per run"
-echo "  Running..."
-timeout 120 go test -fuzz=FuzzGenerateCode -fuzztime="$FUZZ_TIME" . || true
-echo "  ✓ Completed"
-echo ""
+run ./rng FuzzParseSchema
+run ./validator FuzzValidateXML
+run ./generator FuzzGenerateCode
 
-echo "=== Fuzzing Complete ==="
 echo ""
-echo "Results:"
-echo "  - Check for any new testdata/fuzz/ directories created"
-echo "  - These contain failing inputs that triggered crashes"
-echo ""
-echo "To replay a failing input:"
-echo "  go test -fuzz=FuzzParseSchema -run FuzzParseSchema/<name>"
+echo "=== fuzzing complete ==="
+echo "Any crash inputs are written under the package's testdata/fuzz/ directory."

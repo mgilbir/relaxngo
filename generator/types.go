@@ -994,9 +994,11 @@ func sanitizeRefName(name string) string {
 // GenerateCode generates Go source code from TypeInfo structures,
 // including custom UnmarshalXML methods with schema validation using the rng validator.
 // Each type gets a custom UnmarshalXML method that validates the unmarshaled XML against the schema.
-// The schema is embedded in the generated code and automatically initialized.
-// schemaContent should be the raw content of the RELAX NG schema file.
+//
+// The schema embedded in the generated code is produced by re-serializing
+// grammar (so includes/externalRefs are already resolved). The third parameter
+// is therefore ignored and retained only for backward compatibility.
 // Returns formatted Go source code as a string.
-func GenerateCode(types []TypeInfo, packageName string, schemaContent string, grammar *rng.Grammar) (string, error) {
-	return GenerateCodeWithUnmarshal(types, packageName, schemaContent, grammar)
+func GenerateCode(types []TypeInfo, packageName string, _ string, grammar *rng.Grammar) (string, error) {
+	return GenerateCodeWithUnmarshal(types, packageName, "", grammar)
 }
