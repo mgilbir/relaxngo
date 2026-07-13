@@ -276,6 +276,10 @@ var (
 	regexCache   = make(map[string]*regexp.Regexp)
 )
 
+// maxRegexCacheSize bounds the cache. Compiled RE2 programs are small, so this
+// is generous enough that a realistic schema's distinct facet patterns all fit.
+const maxRegexCacheSize = 1024
+
 func cachedRegex(pattern string) *regexp.Regexp {
 	regexCacheMu.RLock()
 	cached, ok := regexCache[pattern]
@@ -290,11 +294,17 @@ func cachedRegex(pattern string) *regexp.Regexp {
 		return nil
 	}
 
-	// Cache only if not too many patterns (prevent unbounded memory growth).
 	regexCacheMu.Lock()
-	if len(regexCache) < 100 {
-		regexCache[pattern] = regex
+	// Bound memory by evicting an arbitrary existing entry when full, rather than
+	// refusing to cache — the old "stop caching past the cap" behaviour made every
+	// pattern beyond the cap recompile on every call.
+	if len(regexCache) >= maxRegexCacheSize {
+		for k := range regexCache {
+			delete(regexCache, k)
+			break
+		}
 	}
+	regexCache[pattern] = regex
 	regexCacheMu.Unlock()
 
 	return regex
