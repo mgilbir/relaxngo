@@ -53,7 +53,9 @@ func (x *{{.TypeName}}) UnmarshalXML(d *xml.Decoder, start xml.StartElement) err
 
 	// Reconstruct the XML for this element
 	enc := xml.NewEncoder(&rawBuf)
-	enc.EncodeToken(start)
+	if err := enc.EncodeToken(start); err != nil {
+		return fmt.Errorf("error encoding start element: %w", err)
+	}
 
 	// Read and copy all tokens until we find the matching end element
 	depth := 1 // We've already written the start element
@@ -78,12 +80,12 @@ func (x *{{.TypeName}}) UnmarshalXML(d *xml.Decoder, start xml.StartElement) err
 			return fmt.Errorf("error encoding token: %w", err)
 		}
 	}
-	enc.Flush()
+	if err := enc.Flush(); err != nil {
+		return fmt.Errorf("error flushing encoder: %w", err)
+	}
 
 	// Validate the captured XML
 	if {{.ValidatorVar}} != nil {
-		// Debug: log what we're validating
-		_ = rawBuf.String() // Keep the buffer content accessible for debugging
 		if errs, err := {{.ValidatorVar}}.Validate(bytes.NewReader(rawBuf.Bytes())); err != nil {
 			return fmt.Errorf("validation error: %w (validating: %s)", err, rawBuf.String())
 		} else if len(errs) > 0 {
@@ -133,7 +135,9 @@ func (x *{{.TypeName}}) Validate() error {
 	if err := enc.Encode(x); err != nil {
 		return fmt.Errorf("failed to serialize {{.TypeName}}: %w", err)
 	}
-	enc.Flush()
+	if err := enc.Flush(); err != nil {
+		return fmt.Errorf("error flushing encoder: %w", err)
+	}
 
 	// Validate the serialized XML
 	if {{.ValidatorVar}} != nil {
