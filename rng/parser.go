@@ -7222,8 +7222,13 @@ func decodePatternAsGrammar(rootElemName string, data []byte, path string) (*Gra
 func decodeExternalRefAsGrammar(data []byte, path string) (*Grammar, error) {
 	extRef := &ExternalRef{}
 	decoder := xml.NewDecoder(bytes.NewReader(data))
-	if err := decoder.Decode(extRef); err != nil || extRef.Href == "" {
+	if err := decoder.Decode(extRef); err != nil {
 		return nil, fmt.Errorf("error parsing %s: %w", path, err)
+	}
+	if extRef.Href == "" {
+		// Decoded cleanly but this is not an externalRef; wrapping the nil decode
+		// error here previously produced "%!w(<nil>)".
+		return nil, fmt.Errorf("error parsing %s: <externalRef> is missing the required href attribute", path)
 	}
 
 	// Set base to the directory of the current path
@@ -7653,12 +7658,10 @@ func resolveExternalRefPattern(extRef ExternalRef, resolver ResourceResolver, vi
 func resolveNestedExternalRefs(grammar *Grammar, resolver ResourceResolver, visited map[string]bool, defineNames map[string]bool) error {
 	// Resolve Start.ExternalRef if present (loop to handle chains of externalRefs)
 	// The spec allows externalRef chains
-	// Per spec section 4.6: externalRef elements reference patterns from other grammar documents
-	//
-	// ExternalRef cycles are allowed in schema definitions - they represent lazy pattern references
-	// and only become problematic during validation if actual content matching loops infinitely.
-	// We break the loop when the externalRef doesn't resolve to a different pattern (cycle detected),
-	// and leave the cyclic externalRef in place for validation to handle.
+	// Per spec section 4.6: externalRef elements reference patterns from other
+	// grammar documents. A schema whose externalRef chain refers back to a file
+	// already in the chain is a recursive externalRef, which the spec forbids; we
+	// detect that below and return an error rather than looping forever.
 
 	seenExternalRefs := make(map[string]bool) // Track resolved paths to detect cycles
 	for grammar.Start.ExternalRef != nil {
@@ -7666,10 +7669,9 @@ func resolveNestedExternalRefs(grammar *Grammar, resolver ResourceResolver, visi
 		resolvedPath := resolveXMLBase(grammar.Start.ExternalRef.Base, grammar.Start.ExternalRef.Href)
 		resolvedPath = filepath.Clean(resolvedPath)
 
-		// Check if we've already tried to resolve this path in this chain
-		// If so, we have a cycle - this is an error per spec
+		// A path already seen in this chain means the externalRefs are recursive,
+		// which the spec forbids.
 		if seenExternalRefs[resolvedPath] {
-			// Cycle detected in externalRef chain - this is not allowed
 			return fmt.Errorf("externalRef cycle detected: %s", resolvedPath)
 		}
 		seenExternalRefs[resolvedPath] = true
