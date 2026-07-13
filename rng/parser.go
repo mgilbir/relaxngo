@@ -7358,15 +7358,17 @@ func parseSchemaAsPattern(data []byte, path string, requiresGrammar bool) (*Gram
 
 // requiresGrammar indicates that the root element must be <grammar> (for includes)
 func parseSchemaWithResolverInternal(path string, resolver ResourceResolver, visited map[string]bool, defineNames map[string]bool, validateRefsAtEnd bool, requiresGrammar bool) (*Grammar, error) {
-	// Check for cycles - used for both includes and externalRefs
+	// Cycle detection for includes and externalRefs. `visited` is the set of
+	// files on the *current* resolution path (a recursion stack), not every file
+	// ever seen: a file is a cycle only if it is its own ancestor. Removing the
+	// path on the way out lets the same file be reached again via a different
+	// branch — a legitimate diamond/DAG include — without a false cycle report.
 	cleanPath := filepath.Clean(path)
 	if visited[cleanPath] {
 		return nil, fmt.Errorf("include cycle detected: %s", cleanPath)
 	}
 	visited[cleanPath] = true
-	// IMPORTANT: Do NOT use defer to delete from visited
-	// For externalRef chains, we need to keep the path marked to detect cycles
-	// We will manually manage cleanup at appropriate points
+	defer delete(visited, cleanPath)
 
 	// Read and parse the schema
 	grammar, err := readAndParseSchema(path, resolver, requiresGrammar)
