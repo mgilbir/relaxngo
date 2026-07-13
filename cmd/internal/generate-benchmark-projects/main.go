@@ -185,7 +185,7 @@ func generateBenchmarkProject(projectDir, schemaPath, xmlPath string, testNum in
 	}
 
 	// Write project files
-	if err := writeProjectFiles(projectDir, code, xmlContent, rootElementName, testNum); err != nil {
+	if err := writeProjectFiles(projectDir, code, xmlContent, xmlPath, rootElementName, testNum); err != nil {
 		return err
 	}
 
@@ -221,7 +221,7 @@ func parseSchemaAndGenerateTypes(schemaPath string) (*rng.Grammar, []generator.T
 	return grammar, types, nil
 }
 
-func writeProjectFiles(projectDir string, code string, xmlContent []byte, rootElementName string, testNum int) error {
+func writeProjectFiles(projectDir string, code string, xmlContent []byte, xmlPath string, rootElementName string, testNum int) error {
 	// Write generated code
 	if err := os.WriteFile(filepath.Join(projectDir, "types.go"), []byte(code), 0o600); err != nil {
 		return fmt.Errorf("failed to write generated code: %w", err)
@@ -241,9 +241,10 @@ replace github.com/mgilbir/relaxngo => %s
 		return fmt.Errorf("failed to write go.mod: %w", err)
 	}
 
-	// Create benchmark test file
+	// Create benchmark test file. The benchmark name comes from the XML file
+	// name (e.g. 1.v.xml), not its contents.
 	rootTypeName := toGoTypeName(rootElementName)
-	xmlBaseName := filepath.Base(string(xmlContent))
+	xmlBaseName := filepath.Base(xmlPath)
 	xmlNameClean := strings.TrimSuffix(xmlBaseName, filepath.Ext(xmlBaseName))
 	xmlNameClean = strings.NewReplacer(".", "_", "-", "_").Replace(xmlNameClean)
 	benchFuncName := fmt.Sprintf("BenchmarkParseValidate_Test%03d_%s", testNum, xmlNameClean)
