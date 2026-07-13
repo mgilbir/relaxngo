@@ -8,6 +8,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/mgilbir/relaxngo/rng"
 )
@@ -170,6 +171,7 @@ func (d *deriver) report(errs *[]ValidationError, e *elemNode, msg string) {
 
 func buildDocTree(data []byte, maxDepth int) (*elemNode, error) {
 	dec := xml.NewDecoder(bytes.NewReader(data))
+	dec.CharsetReader = charsetReader
 	for {
 		off := dec.InputOffset()
 		tok, err := dec.Token()
@@ -265,6 +267,45 @@ func isNamespaceDecl(name xml.Name) bool {
 	return name.Local == "xmlns" ||
 		name.Space == "xmlns" ||
 		name.Space == "http://www.w3.org/2000/xmlns/"
+}
+
+// charsetReader supplies the xml.Decoder with support for the non-UTF-8
+// encodings it cannot decode on its own. Without it the decoder rejects any
+// document declaring, e.g., encoding="ISO-8859-1".
+//
+// To keep the package dependency-free we cover the common single-byte Western
+// encodings and pass UTF-8/ASCII through untouched; an unrecognized charset
+// returns a clear error rather than silently mis-decoding.
+func charsetReader(label string, input io.Reader) (io.Reader, error) {
+	switch normalizeCharsetLabel(label) {
+	case "", "utf-8", "utf8", "us-ascii", "ascii":
+		// The Go decoder already treats the byte stream as UTF-8; ASCII is a
+		// subset, so both pass through unchanged.
+		return input, nil
+	case "iso-8859-1", "iso8859-1", "latin1", "latin-1", "l1", "cp819", "iso-ir-100":
+		return newLatin1Reader(input)
+	default:
+		return nil, fmt.Errorf("unsupported character encoding %q", label)
+	}
+}
+
+func normalizeCharsetLabel(label string) string {
+	return strings.ToLower(strings.TrimSpace(label))
+}
+
+// newLatin1Reader transcodes ISO-8859-1 to UTF-8. In ISO-8859-1 every byte is a
+// code point in U+0000..U+00FF, so the mapping is byte b -> rune(b).
+func newLatin1Reader(input io.Reader) (io.Reader, error) {
+	data, err := io.ReadAll(input)
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	buf.Grow(len(data))
+	for _, b := range data {
+		buf.WriteRune(rune(b))
+	}
+	return &buf, nil
 }
 
 func offsetToLineCol(data []byte, off int) (line, col int) {
