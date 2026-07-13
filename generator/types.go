@@ -409,7 +409,7 @@ func addTextValueField(typeInfo *TypeInfo, elem *rng.Element, seenFields map[str
 
 func addDirectAttributes(typeInfo *TypeInfo, elem *rng.Element, seenFields map[string]bool) {
 	for _, attr := range elem.Attributes {
-		fieldType := getAttributeFieldType(&attr, elem)
+		fieldType := getAttributeFieldType(&attr)
 		fieldName := toGoFieldName(attr.Name)
 		if !seenFields[fieldName] {
 			typeInfo.Fields = append(typeInfo.Fields, FieldInfo{
@@ -548,7 +548,7 @@ func addChoiceAttribute(typeInfo *TypeInfo, attr *rng.Attribute, elem *rng.Eleme
 	}
 	typeInfo.Fields = append(typeInfo.Fields, FieldInfo{
 		Name:   fieldName,
-		Type:   getAttributeFieldType(attr, elem),
+		Type:   getAttributeFieldType(attr),
 		XMLTag: fmt.Sprintf("`xml:\"%s,attr,omitempty\"`", attr.Name),
 	})
 	seenFields[fieldName] = true
@@ -598,16 +598,18 @@ func hasNestedContent(elem *rng.Element) bool {
 	return false
 }
 
-func getAttributeFieldType(attr *rng.Attribute, elem *rng.Element) string {
+func getAttributeFieldType(attr *rng.Attribute) string {
 	if attr.Choice != nil && len(attr.Choice.Values) > 0 {
 		return stringType
 	}
 	if attr.Data != nil {
 		return mapDataType(attr.Data.Type)
 	}
-	if elem.List != nil && elem.List.Data != nil {
-		elemType := mapDataType(elem.List.Data.Type)
-		return "[]" + elemType
+	// A <list> in the attribute's own content maps to a slice (space-separated
+	// tokens). This must key off the attribute, not the enclosing element: an
+	// element's <list> body says nothing about the attribute's type.
+	if attr.List != nil && attr.List.Data != nil {
+		return "[]" + mapDataType(attr.List.Data.Type)
 	}
 	return stringType
 }
